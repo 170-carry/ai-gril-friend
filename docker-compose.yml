@@ -1,0 +1,102 @@
+services:
+  # Postgres + pgvector：主数据存储。
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: ai-gf-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_gf}
+      POSTGRES_USER: ${POSTGRES_USER:-root}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${POSTGRES_PORT:-50081}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Redis：预留缓存/会话等能力（当前核心链路可不强依赖）。
+  redis:
+    image: redis:7-alpine
+    container_name: ai-gf-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-123456}"]
+    ports:
+      - "${REDIS_PORT:-20081}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-123456}
+
+  # 应用服务：Fiber API + Prompt Builder + LLM 调用。
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-gf-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_ADDR: :9901
+      DATABASE_URL: postgres://${POSTGRES_USER:-root}:${POSTGRES_PASSWORD:-123456}@db:5432/${POSTGRES_DB:-ai_gf}?sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-123456}
+      REDIS_DB: ${REDIS_DB:-8}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.8}
+      MAX_HISTORY_ROUNDS: ${MAX_HISTORY_ROUNDS:-20}
+      PROMPT_MAX_TOKENS: ${PROMPT_MAX_TOKENS:-3200}
+      PROMPT_RESERVE_TOKENS: ${PROMPT_RESERVE_TOKENS:-800}
+      PROMPT_BUDGET_SYSTEM_RATIO: ${PROMPT_BUDGET_SYSTEM_RATIO:-35}
+      PROMPT_BUDGET_MEMORY_RATIO: ${PROMPT_BUDGET_MEMORY_RATIO:-25}
+      PROMPT_BUDGET_HISTORY_RATIO: ${PROMPT_BUDGET_HISTORY_RATIO:-40}
+      PROACTIVE_ENABLED: ${PROACTIVE_ENABLED:-true}
+      PROACTIVE_SCAN_SEC: ${PROACTIVE_SCAN_SEC:-10}
+      PROACTIVE_BATCH_SIZE: ${PROACTIVE_BATCH_SIZE:-20}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${APP_PORT:-9901}:9901"
+
+  # 备份服务：定时执行 pg_dump 到本地目录。
+  db-backup:
+    image: postgres:16-alpine
+    container_name: ai-gf-db-backup
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-ai_gf}
+      POSTGRES_USER: ${POSTGRES_USER:-root}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-123456}
+      BACKUP_DIR: /backups
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-21600}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    entrypoint: ["sh", "/backup.sh"]
+
+volumes:
+  # 数据卷：数据库持久化目录。
+  db_data:
+  # 数据卷：Redis 持久化目录。
+  redis_data:
