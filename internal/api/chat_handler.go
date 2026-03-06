@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ai-gf/internal/chat"
+	"ai-gf/internal/proactive"
 	"ai-gf/internal/prompt"
 	"ai-gf/internal/repo"
 
@@ -472,10 +473,24 @@ func (h *ChatHandler) DebugProactive(c *fiber.Ctx) error {
 		})
 	}
 
+	decisionEngine := proactive.NewDecisionEngine(proactive.DefaultDecisionConfig())
+	taskDecisions := make([]fiber.Map, 0, len(tasks))
+	now := time.Now()
+	for _, task := range tasks {
+		decision := decisionEngine.Evaluate(task, state, now)
+		taskDecisions = append(taskDecisions, fiber.Map{
+			"task_id":   task.ID,
+			"status":    task.Status,
+			"task_type": task.TaskType,
+			"decision":  decision,
+		})
+	}
+
 	return c.JSON(fiber.Map{
 		"state":          state,
 		"tasks":          tasks,
 		"outbound_queue": outbound,
+		"task_decisions": taskDecisions,
 	})
 }
 
@@ -494,6 +509,7 @@ func buildPersona(in personaInput) prompt.PersonaConfig {
 	}
 	if in.RelationshipStage != "" {
 		persona.RelationshipStage = in.RelationshipStage
+		persona.RelationshipStageProvided = true
 	}
 	if in.Emotion != "" {
 		persona.Emotion = in.Emotion

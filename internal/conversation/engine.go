@@ -6,10 +6,15 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"ai-gf/internal/signals"
 )
 
 // Engine 是 Conversation Engine（CE）入口，负责把输入上下文转换为可执行的对话计划。
-type Engine struct{}
+type Engine struct {
+	matcher         *signals.Matcher
+	topicSummarizer TopicSummarizer
+}
 
 var (
 	// timeSignalPattern 只匹配真正像“时间”的片段，避免“有点焦虑”误命中“点”。
@@ -17,8 +22,28 @@ var (
 )
 
 // NewEngine 创建默认 CE 实例（规则路由 + 状态机 + 规划器）。
-func NewEngine() *Engine {
-	return &Engine{}
+func NewEngine(embedders ...signals.Embedder) *Engine {
+	var embedder signals.Embedder
+	if len(embedders) > 0 {
+		embedder = embedders[0]
+	}
+	return &Engine{
+		matcher: signals.NewMatcher(embedder),
+	}
+}
+
+func (e *Engine) UseSignalAnalyzer(analyzer signals.Analyzer) {
+	if e == nil || e.matcher == nil {
+		return
+	}
+	e.matcher.SetAnalyzer(analyzer)
+}
+
+func (e *Engine) UseTopicSummarizer(summarizer TopicSummarizer) {
+	if e == nil {
+		return
+	}
+	e.topicSummarizer = summarizer
 }
 
 // BuildPlan 生成一轮对话计划。
@@ -27,14 +52,18 @@ func (e *Engine) BuildPlan(ctx context.Context, req ConversationRequest) Convers
 	_ = ctx
 	req = req.Normalize()
 
-	intent, confidence := routeIntent(req.UserMessage)
+	intent, confidence := routeIntent(ctx, e.matcher, req.UserMessage)
 	currentState, nextState := resolveStates(intent, req.UserMessage)
 	mode := resolveMode(intent, currentState, nextState, req.UserMessage)
-	tone := resolveTone(intent, req.RelationshipState, req.MemorySnapshot.UserPreferences)
+	topic := e.resolveTopicStrategy(ctx, req, intent)
+	if topic.Mode == "gentle_recall" && (mode == "small_talk" || mode == "companion_chat") {
+		mode = "reconnect_then_recall"
+	}
+	tone := resolveTone(intent, req.RelationshipSnapshot, req.MemorySnapshot.UserPreferences)
 	structure := resolveStructure(intent, mode, req.UserMessage, req.EmotionIntensity)
-	questions := resolveQuestions(intent, mode, req.UserMessage)
+	questions := resolveQuestions(intent, mode, req.UserMessage, topic)
 	stopRules := resolveStopRules(req.UserMessage)
-	actions := resolveActions(req, intent)
+	actions := resolveActions(req, intent, topic)
 
 	plan := ConversationPlan{
 		Intent:            intent,
@@ -47,6 +76,8 @@ func (e *Engine) BuildPlan(ctx context.Context, req ConversationRequest) Convers
 		Questions:         questions,
 		Actions:           actions,
 		StopRules:         stopRules,
+		Relationship:      req.RelationshipSnapshot,
+		Topic:             topic,
 	}
 
 	// 最终安全门：对高风险/边界拒绝内容做硬性收敛，避免规划器继续深挖。
@@ -62,11 +93,47 @@ func RenderPlanForPrompt(plan ConversationPlan) string {
 	lines = append(lines, fmt.Sprintf("- intent: %s (conf=%.2f)", plan.Intent, clamp01(plan.IntentConfidence)))
 	lines = append(lines, "- mode: "+strings.TrimSpace(plan.Mode))
 	lines = append(lines, fmt.Sprintf("- state: %s -> %s", plan.CurrentState, plan.NextState))
+	lines = append(lines, fmt.Sprintf("- relationship: stage=%s familiarity=%.2f intimacy=%.2f trust=%.2f flirt=%.2f boundary_risk=%.2f support_need=%.2f playfulness=%.2f heat=%.2f",
+		strings.TrimSpace(plan.Relationship.Stage),
+		clamp01(plan.Relationship.Familiarity),
+		clamp01(plan.Relationship.Intimacy),
+		clamp01(plan.Relationship.Trust),
+		clamp01(plan.Relationship.Flirt),
+		clamp01(plan.Relationship.BoundaryRisk),
+		clamp01(plan.Relationship.SupportNeed),
+		clamp01(plan.Relationship.Playfulness),
+		clamp01(plan.Relationship.InteractionHeat),
+	))
 	lines = append(lines, fmt.Sprintf("- tone: warmth=%.2f, playfulness=%.2f, directness=%.2f, length=%s, emoji_level=%d",
 		clamp01(plan.Tone.Warmth), clamp01(plan.Tone.Playfulness), clamp01(plan.Tone.Directness), strings.TrimSpace(plan.Tone.Length), clampInt(plan.Tone.EmojiLevel, 0, 2)))
 
 	if len(plan.ResponseStructure) > 0 {
 		lines = append(lines, "- structure: "+strings.Join(plan.ResponseStructure, " -> "))
+	}
+	if strings.TrimSpace(plan.Topic.Mode) != "" && plan.Topic.Mode != "none" {
+		lines = append(lines, fmt.Sprintf("- topic: mode=%s label=%s reason=%s",
+			strings.TrimSpace(plan.Topic.Mode),
+			strings.TrimSpace(plan.Topic.TopicLabel),
+			strings.TrimSpace(plan.Topic.Reason),
+		))
+		if hint := strings.TrimSpace(plan.Topic.CallbackHint); hint != "" {
+			lines = append(lines, "- topic_hint: "+hint)
+		}
+		if len(plan.Topic.Related) > 0 {
+			labels := make([]string, 0, len(plan.Topic.Related))
+			for _, item := range plan.Topic.Related {
+				if label := strings.TrimSpace(item.TopicLabel); label != "" {
+					if relation := strings.TrimSpace(item.RelationType); relation != "" {
+						labels = append(labels, label+"("+relation+")")
+					} else {
+						labels = append(labels, label)
+					}
+				}
+			}
+			if len(labels) > 0 {
+				lines = append(lines, "- topic_related: [\""+strings.Join(labels, "\", \"")+"\"]")
+			}
+		}
 	}
 
 	if len(plan.Questions) > 0 {
@@ -108,40 +175,48 @@ func renderAction(action Action) string {
 	return action.Type + "(" + strings.Join(pairs, ", ") + ")"
 }
 
-// routeIntent 通过规则路由用户意图，并返回置信度。
-func routeIntent(msg string) (Intent, float64) {
+// routeIntent 通过共享信号配置路由用户意图，并返回置信度。
+func routeIntent(ctx context.Context, matcher *signals.Matcher, msg string) (Intent, float64) {
 	text := strings.ToLower(strings.TrimSpace(msg))
 	if text == "" {
 		return IntentSmallTalk, 0.4
 	}
 
-	scores := map[Intent]int{
-		IntentEmotionalSupport: scoreKeywords(text, []string{"焦虑", "难受", "崩溃", "压力", "低落", "委屈", "心累", "烦", "孤独", "害怕", "失眠"}),
-		IntentAdviceSolving:    scoreKeywords(text, []string{"怎么办", "怎么做", "建议", "方案", "步骤", "帮我想", "如何", "要不要", "能不能"}),
-		IntentSmallTalk:        scoreKeywords(text, []string{"在吗", "你好", "哈喽", "哈哈", "聊聊", "最近怎么样"}),
-		IntentStorySharing:     scoreKeywords(text, []string{"我今天", "刚刚", "发生", "经历", "想跟你说", "告诉你"}),
-		IntentPlanningEvent:    scoreKeywords(text, []string{"明天", "下周", "今晚", "面试", "会议", "提醒", "日程", "安排", "计划"}),
-		IntentRelationship:     scoreKeywords(text, []string{"想你", "抱抱", "亲亲", "恋爱", "喜欢你", "爱你", "暧昧"}),
-		IntentBoundarySafety:   scoreKeywords(text, []string{"别问", "不想聊", "别再提", "不要提", "隐私", "轻生", "自杀", "伤害", "违法"}),
-		IntentMetaProduct:      scoreKeywords(text, []string{"你是谁", "你能做什么", "怎么工作", "模型", "prompt", "系统"}),
+	if matcher == nil {
+		matcher = signals.NewMatcher(nil)
+	}
+	scores := matcher.ScoreIntents(ctx, text)
+	candidates := []Intent{
+		IntentEmotionalSupport,
+		IntentAdviceSolving,
+		IntentSmallTalk,
+		IntentStorySharing,
+		IntentPlanningEvent,
+		IntentRelationship,
+		IntentBoundarySafety,
+		IntentMetaProduct,
 	}
 
 	intent := IntentSmallTalk
-	top := -1
-	second := -1
-	for k, v := range scores {
+	top := -1.0
+	second := -1.0
+	for _, candidate := range candidates {
+		v := scores[string(candidate)]
 		if v > top {
 			second = top
 			top = v
-			intent = k
+			intent = candidate
 			continue
 		}
 		if v > second {
 			second = v
 		}
 	}
+	if second < 0 {
+		second = 0
+	}
 
-	if top <= 0 {
+	if top <= 0.05 {
 		// 无明显命中时，带问号偏向“建议”，否则偏向“闲聊”。
 		if strings.Contains(text, "？") || strings.Contains(text, "?") {
 			return IntentAdviceSolving, 0.45
@@ -150,12 +225,18 @@ func routeIntent(msg string) (Intent, float64) {
 	}
 
 	// “焦虑 + 怎么办”优先归入情绪支持，先接住再解决。
-	if scores[IntentEmotionalSupport] > 0 && scores[IntentAdviceSolving] > 0 && scores[IntentEmotionalSupport] >= scores[IntentAdviceSolving] {
+	if scores[string(IntentEmotionalSupport)] >= 0.28 &&
+		scores[string(IntentAdviceSolving)] >= 0.28 &&
+		scores[string(IntentEmotionalSupport)] >= scores[string(IntentAdviceSolving)] {
 		intent = IntentEmotionalSupport
+		top = scores[string(IntentEmotionalSupport)]
 	}
 
-	margin := top - maxInt(second, 0)
-	conf := 0.55 + 0.08*float64(top) + 0.06*float64(margin)
+	margin := maxFloat(top-second, 0)
+	conf := 0.45 + 0.35*top + 0.20*margin
+	if intent == IntentBoundarySafety && scores[string(IntentBoundarySafety)] >= 0.60 {
+		conf = maxFloat(conf, 0.92)
+	}
 	return intent, clamp01(conf)
 }
 
@@ -217,27 +298,58 @@ func resolveMode(intent Intent, current, next State, userMessage string) string 
 }
 
 // resolveTone 生成可控风格参数（warmth/playfulness/directness/length/emoji_level）。
-func resolveTone(intent Intent, relationshipState string, preferences string) ToneConfig {
+func resolveTone(intent Intent, relationship RelationshipSnapshot, preferences string) ToneConfig {
 	tone := ToneConfig{
-		Warmth:      0.78,
-		Playfulness: 0.25,
+		Warmth:      0.76,
+		Playfulness: 0.16,
 		Directness:  0.45,
 		Length:      "medium",
 		EmojiLevel:  1,
 	}
 
-	switch strings.ToLower(strings.TrimSpace(relationshipState)) {
-	case "stranger":
-		tone.Warmth = 0.62
-		tone.Playfulness = 0.08
+	switch strings.ToLower(strings.TrimSpace(relationship.Stage)) {
+	case "companion":
+		tone.Warmth = 0.64
+		tone.Playfulness = 0.05
+		tone.Directness = 0.50
 		tone.EmojiLevel = 0
-	case "friend":
-		tone.Warmth = 0.72
-		tone.Playfulness = 0.18
+	case "familiar":
+		tone.Warmth = 0.74
+		tone.Playfulness = 0.14
+	case "trust_building":
+		tone.Warmth = 0.84
+		tone.Playfulness = 0.10
+		tone.Directness = 0.40
+	case "light_flirt":
+		tone.Warmth = 0.88
+		tone.Playfulness = 0.24
+		tone.Directness = 0.42
 	case "romantic":
 		tone.Warmth = 0.90
 		tone.Playfulness = 0.35
-		tone.EmojiLevel = 1
+		tone.Directness = 0.40
+	}
+
+	// 先按“熟悉度/信任/热度/暧昧接受度”做微调，让同阶段内也有细腻差异。
+	tone.Warmth = clamp01(tone.Warmth + (relationship.Familiarity-0.5)*0.10 + (relationship.Trust-0.5)*0.16 + (relationship.InteractionHeat-0.5)*0.10)
+	tone.Playfulness = clamp01(minFloat(tone.Playfulness+(relationship.InteractionHeat-0.5)*0.10+(relationship.Flirt-0.5)*0.12, relationship.Playfulness))
+	if relationship.Trust < 0.45 {
+		tone.Playfulness = minFloat(tone.Playfulness, 0.18)
+	}
+	if relationship.InteractionHeat < 0.30 {
+		tone.Warmth = minFloat(tone.Warmth, 0.82)
+	}
+	if relationship.SupportNeed >= 0.58 {
+		tone.Warmth = maxFloat(tone.Warmth, 0.88)
+		tone.Playfulness = minFloat(tone.Playfulness, 0.10)
+		tone.Directness = minFloat(tone.Directness, 0.40)
+		tone.Length = "medium"
+	}
+	if relationship.BoundaryRisk >= 0.35 {
+		tone.Warmth = minFloat(maxFloat(tone.Warmth, 0.78), 0.86)
+		tone.Playfulness = 0
+		tone.Directness = maxFloat(tone.Directness, 0.52)
+		tone.EmojiLevel = 0
 	}
 
 	switch intent {
@@ -298,12 +410,15 @@ func resolveStructure(intent Intent, mode string, userMessage string, emotionInt
 }
 
 // resolveQuestions 生成 0~1 个推进型追问。
-func resolveQuestions(intent Intent, mode string, userMessage string) []string {
+func resolveQuestions(intent Intent, mode string, userMessage string, topic TopicStrategy) []string {
 	if shouldStopAsking(userMessage) || mode == "safe_redirect" || mode == "safety_support" {
 		return nil
 	}
 
 	text := strings.ToLower(strings.TrimSpace(userMessage))
+	if q := resolveTopicQuestion(topic, text); q != "" {
+		return []string{q}
+	}
 	switch intent {
 	case IntentEmotionalSupport:
 		if containsAny(text, []string{"面试", "汇报", "考试"}) {
@@ -339,7 +454,7 @@ func resolveStopRules(userMessage string) []string {
 }
 
 // resolveActions 生成记忆钩子与主动触发钩子的动作建议。
-func resolveActions(req ConversationRequest, intent Intent) []Action {
+func resolveActions(req ConversationRequest, intent Intent, topic TopicStrategy) []Action {
 	text := strings.TrimSpace(req.UserMessage)
 	lower := strings.ToLower(text)
 	actions := make([]Action, 0, 6)
@@ -408,6 +523,8 @@ func resolveActions(req ConversationRequest, intent Intent) []Action {
 			Reason: "高强度负面情绪回访",
 		})
 	}
+
+	actions = append(actions, buildTopicActions(req, intent, topic)...)
 
 	// 关系互动类场景通常无需写太多动作，避免过度记忆化。
 	if intent == IntentRelationship && len(actions) > 2 {
@@ -512,16 +629,6 @@ func containsAny(text string, keywords []string) bool {
 		}
 	}
 	return false
-}
-
-func scoreKeywords(text string, keywords []string) int {
-	score := 0
-	for _, kw := range keywords {
-		if strings.Contains(text, kw) {
-			score++
-		}
-	}
-	return score
 }
 
 func limitQuestions(questions []string, limit int) []string {

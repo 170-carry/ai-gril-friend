@@ -66,6 +66,91 @@ var migrationStatements = []string{
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_life_events_user_event_time
 			ON life_events (user_id, event_time ASC);`,
+	`CREATE TABLE IF NOT EXISTS relationship_state (
+		user_id TEXT PRIMARY KEY,
+		stage TEXT NOT NULL DEFAULT 'familiar',
+		familiarity_score DOUBLE PRECISION NOT NULL DEFAULT 0.36,
+		intimacy_score DOUBLE PRECISION NOT NULL DEFAULT 0.24,
+		trust_score DOUBLE PRECISION NOT NULL DEFAULT 0.40,
+		flirt_score DOUBLE PRECISION NOT NULL DEFAULT 0.08,
+		boundary_risk_score DOUBLE PRECISION NOT NULL DEFAULT 0.08,
+		support_need_score DOUBLE PRECISION NOT NULL DEFAULT 0.30,
+		playfulness_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.20,
+		interaction_heat DOUBLE PRECISION NOT NULL DEFAULT 0.22,
+		total_turns INT NOT NULL DEFAULT 0,
+		last_interaction_at TIMESTAMPTZ NULL,
+		last_user_message_at TIMESTAMPTZ NULL,
+		last_assistant_message_at TIMESTAMPTZ NULL,
+		last_stage_change_at TIMESTAMPTZ NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);`,
+	`ALTER TABLE relationship_state
+		ADD COLUMN IF NOT EXISTS familiarity_score DOUBLE PRECISION NOT NULL DEFAULT 0.36;`,
+	`ALTER TABLE relationship_state
+		ADD COLUMN IF NOT EXISTS flirt_score DOUBLE PRECISION NOT NULL DEFAULT 0.08;`,
+	`ALTER TABLE relationship_state
+		ADD COLUMN IF NOT EXISTS boundary_risk_score DOUBLE PRECISION NOT NULL DEFAULT 0.08;`,
+	`ALTER TABLE relationship_state
+		ADD COLUMN IF NOT EXISTS support_need_score DOUBLE PRECISION NOT NULL DEFAULT 0.30;`,
+	`CREATE TABLE IF NOT EXISTS conversation_topics (
+		id BIGSERIAL PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		session_id TEXT NOT NULL DEFAULT 'default',
+		topic_key TEXT NOT NULL,
+		topic_label TEXT NOT NULL,
+		summary TEXT NOT NULL DEFAULT '',
+		callback_hint TEXT NOT NULL DEFAULT '',
+		cluster_key TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'active'
+			CHECK (status IN ('active', 'resolved')),
+		importance INT NOT NULL DEFAULT 3,
+		mention_count INT NOT NULL DEFAULT 1,
+		recall_count INT NOT NULL DEFAULT 0,
+		source_message_id BIGINT NULL REFERENCES chat_messages(id) ON DELETE SET NULL,
+		metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+		last_discussed_at TIMESTAMPTZ NULL,
+		next_recall_at TIMESTAMPTZ NULL,
+		last_recalled_at TIMESTAMPTZ NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (user_id, session_id, topic_key)
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_conversation_topics_user_session
+			ON conversation_topics (
+				user_id,
+				session_id,
+				status,
+				COALESCE(next_recall_at, last_discussed_at, created_at) DESC,
+				id DESC
+			);`,
+	`ALTER TABLE conversation_topics
+		ADD COLUMN IF NOT EXISTS cluster_key TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE conversation_topics
+		ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;`,
+	`CREATE TABLE IF NOT EXISTS conversation_topic_edges (
+		id BIGSERIAL PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		session_id TEXT NOT NULL DEFAULT 'default',
+		from_topic_key TEXT NOT NULL,
+		to_topic_key TEXT NOT NULL,
+		relation_type TEXT NOT NULL DEFAULT 'co_occurs',
+		weight DOUBLE PRECISION NOT NULL DEFAULT 1,
+		evidence_count INT NOT NULL DEFAULT 1,
+		last_linked_at TIMESTAMPTZ NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (user_id, session_id, from_topic_key, to_topic_key, relation_type)
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_conversation_topic_edges_user_session
+			ON conversation_topic_edges (
+				user_id,
+				session_id,
+				from_topic_key,
+				to_topic_key,
+				updated_at DESC,
+				id DESC
+			);`,
 	`CREATE TABLE IF NOT EXISTS proactive_state (
 		user_id TEXT PRIMARY KEY,
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -76,9 +161,15 @@ var migrationStatements = []string{
 		cooldown_seconds INT NOT NULL DEFAULT 43200,
 		last_proactive_at TIMESTAMPTZ NULL,
 		last_proactive_reason TEXT NOT NULL DEFAULT '',
+		last_proactive_task_type TEXT NOT NULL DEFAULT '',
+		last_proactive_content TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`,
+	`ALTER TABLE proactive_state
+		ADD COLUMN IF NOT EXISTS last_proactive_task_type TEXT NOT NULL DEFAULT '';`,
+	`ALTER TABLE proactive_state
+		ADD COLUMN IF NOT EXISTS last_proactive_content TEXT NOT NULL DEFAULT '';`,
 	`CREATE TABLE IF NOT EXISTS proactive_tasks (
 		id BIGSERIAL PRIMARY KEY,
 		user_id TEXT NOT NULL,

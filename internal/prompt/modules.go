@@ -111,8 +111,18 @@ func (m *relationshipModule) Build(ctx context.Context, req BuildRequest) ([]Pro
 	}
 
 	content := fmt.Sprintf(`RELATIONSHIP_STATE
-- 当前阶段：%s
-- stage=friend/close/romantic 时可增加亲密感，但必须尊重边界，不操控用户，不鼓励现实社交隔离。`, stage)
+- stage=%s familiarity=%.2f intimacy=%.2f trust=%.2f flirt=%.2f boundary_risk=%.2f support_need=%.2f playfulness=%.2f heat=%.2f
+- 按阶段和分数自然控制亲密感与玩笑强度；始终守边界，不过界、不操控。`,
+		stage,
+		req.Persona.RelationshipFamiliarity,
+		req.Persona.RelationshipIntimacy,
+		req.Persona.RelationshipTrust,
+		req.Persona.RelationshipFlirt,
+		req.Persona.RelationshipBoundaryRisk,
+		req.Persona.RelationshipSupportNeed,
+		req.Persona.RelationshipPlayfulness,
+		req.Persona.RelationshipHeat,
+	)
 
 	return []PromptBlock{
 		{
@@ -237,6 +247,35 @@ func (m *eventsModule) Build(ctx context.Context, req BuildRequest) ([]PromptBlo
 	return []PromptBlock{
 		{
 			ID:         "events",
+			Priority:   m.Priority(),
+			Kind:       MessageKindSystem,
+			Bucket:     BucketProfile,
+			Content:    content,
+			TokensEst:  estimateTextTokens(content),
+			Hard:       false,
+			Redactable: true,
+		},
+	}, nil
+}
+
+// topicsModule 注入当前可延续/可回钩的话题上下文。
+type topicsModule struct{ baseModule }
+
+// newTopicsModule 创建话题上下文模块。
+func newTopicsModule() Module {
+	return &topicsModule{baseModule{id: "topics", priority: 75, required: false}}
+}
+
+// Build 输出 [Active Topics] block。
+func (m *topicsModule) Build(ctx context.Context, req BuildRequest) ([]PromptBlock, error) {
+	text := cleanNullable(req.Persona.TopicContext)
+	if text == "" {
+		return nil, nil
+	}
+	content := "[Active Topics]\n" + text
+	return []PromptBlock{
+		{
+			ID:         "topics",
 			Priority:   m.Priority(),
 			Kind:       MessageKindSystem,
 			Bucket:     BucketProfile,

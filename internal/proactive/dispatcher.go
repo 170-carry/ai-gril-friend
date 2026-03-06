@@ -3,6 +3,7 @@ package proactive
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,11 +39,12 @@ func (c DispatcherConfig) Normalize() DispatcherConfig {
 
 // Dispatcher 负责把 proactive_tasks 推进到 outbound_queue，再送入 chat_messages/chat_outbox。
 type Dispatcher struct {
-	repo   DispatcherRepository
-	cfg    DispatcherConfig
-	stopCh chan struct{}
-	wg     sync.WaitGroup
-	start  atomic.Bool
+	repo     DispatcherRepository
+	cfg      DispatcherConfig
+	decision *DecisionEngine
+	stopCh   chan struct{}
+	wg       sync.WaitGroup
+	start    atomic.Bool
 }
 
 // NewDispatcher 创建主动消息调度器。
@@ -51,9 +53,10 @@ func NewDispatcher(repository DispatcherRepository, cfg DispatcherConfig) *Dispa
 		return nil
 	}
 	return &Dispatcher{
-		repo:   repository,
-		cfg:    cfg.Normalize(),
-		stopCh: make(chan struct{}),
+		repo:     repository,
+		cfg:      cfg.Normalize(),
+		decision: NewDecisionEngine(DefaultDecisionConfig()),
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -136,30 +139,51 @@ func (d *Dispatcher) stageDueTasks(ctx context.Context, now time.Time) (int, err
 
 	staged := 0
 	for _, task := range tasks {
+		if action, nextAt, reason, err := d.evaluateTopicTask(ctx, task, now); err != nil {
+			return staged, err
+		} else {
+			switch action {
+			case DecisionCancel:
+				if err := d.repo.CancelTask(ctx, task.ID, reason); err != nil {
+					return staged, err
+				}
+				continue
+			case DecisionDefer:
+				if nextAt.IsZero() {
+					nextAt = now.Add(30 * time.Minute)
+				}
+				if err := d.repo.RescheduleTask(ctx, task.ID, nextAt, reason); err != nil {
+					return staged, err
+				}
+				continue
+			}
+		}
+
 		state, err := d.repo.GetState(ctx, task.UserID)
 		if err != nil {
 			return staged, err
 		}
-
-		if !state.Enabled {
-			if err := d.repo.CancelTask(ctx, task.ID, "用户已关闭主动消息"); err != nil {
+		decision := d.decision.Evaluate(task, state, now)
+		switch decision.Action {
+		case DecisionCancel:
+			if err := d.repo.CancelTask(ctx, task.ID, decision.Summary); err != nil {
+				return staged, err
+			}
+			continue
+		case DecisionDefer:
+			nextAt := now.Add(10 * time.Minute)
+			if decision.NextAttemptAt != nil && !decision.NextAttemptAt.IsZero() {
+				nextAt = *decision.NextAttemptAt
+			}
+			if err := d.repo.RescheduleTask(ctx, task.ID, nextAt, decision.Summary); err != nil {
 				return staged, err
 			}
 			continue
 		}
 
-		if deferQuiet, nextAt := ShouldDeferForQuietHours(state, now); deferQuiet {
-			if err := d.repo.RescheduleTask(ctx, task.ID, nextAt, "命中免打扰时段"); err != nil {
-				return staged, err
-			}
-			continue
-		}
-
-		if deferCooldown, nextAt := ShouldDeferForCooldown(state, task, now); deferCooldown {
-			if err := d.repo.RescheduleTask(ctx, task.ID, nextAt, "命中主动冷却时间"); err != nil {
-				return staged, err
-			}
-			continue
+		payload, err := d.buildOutboundPayload(ctx, task, now)
+		if err != nil {
+			return staged, err
 		}
 
 		_, created, err := d.repo.EnqueueOutbound(ctx, repo.OutboundQueueItem{
@@ -168,7 +192,7 @@ func (d *Dispatcher) stageDueTasks(ctx context.Context, now time.Time) (int, err
 			TaskID:        task.ID,
 			Reason:        task.Reason,
 			DedupKey:      task.DedupKey,
-			Payload:       BuildOutboundPayload(task),
+			Payload:       payload,
 			MaxAttempts:   d.cfg.MaxAttempts,
 			NextAttemptAt: now,
 		})
@@ -192,6 +216,92 @@ func (d *Dispatcher) stageDueTasks(ctx context.Context, now time.Time) (int, err
 		staged++
 	}
 	return staged, nil
+}
+
+func (d *Dispatcher) evaluateTopicTask(ctx context.Context, task repo.ProactiveTask, now time.Time) (DecisionAction, time.Time, string, error) {
+	if strings.TrimSpace(task.TaskType) != "topic_reengage" {
+		return "", time.Time{}, "", nil
+	}
+	topicKey := strings.TrimSpace(toString(task.Payload["topic_key"]))
+	if topicKey == "" {
+		return DecisionCancel, time.Time{}, "缺少 topic_key，取消本次话题回钩", nil
+	}
+	topic, err := d.repo.GetConversationTopic(ctx, task.UserID, task.SessionID, topicKey)
+	if err != nil {
+		return "", time.Time{}, "", err
+	}
+	if strings.TrimSpace(topic.TopicKey) == "" {
+		return DecisionCancel, time.Time{}, "对应话题不存在，取消本次回钩", nil
+	}
+	if strings.TrimSpace(topic.Status) != "active" {
+		return DecisionCancel, time.Time{}, "话题已收束，不再主动回钩", nil
+	}
+	if topic.LastDiscussedAt != nil && topic.LastDiscussedAt.After(task.CreatedAt.Add(30*time.Minute)) {
+		return DecisionCancel, time.Time{}, "话题在此后已被重新聊过，本次回钩已过时", nil
+	}
+	if topic.LastRecalledAt != nil && topic.LastRecalledAt.After(task.CreatedAt) {
+		return DecisionCancel, time.Time{}, "该话题已经主动回钩过，跳过重复触达", nil
+	}
+	if topic.NextRecallAt != nil && now.Before(*topic.NextRecallAt) {
+		return DecisionDefer, *topic.NextRecallAt, "话题仍在冷却，顺延到下一次适合回钩的时间", nil
+	}
+	return "", time.Time{}, "", nil
+}
+
+func (d *Dispatcher) buildOutboundPayload(ctx context.Context, task repo.ProactiveTask, now time.Time) (map[string]any, error) {
+	payload := BuildOutboundPayload(task)
+	if strings.TrimSpace(task.TaskType) != "topic_reengage" {
+		return payload, nil
+	}
+	secondaryKey := strings.TrimSpace(toString(payload["secondary_topic_key"]))
+	if secondaryKey == "" {
+		return payload, nil
+	}
+	switch normalizeOutboundTopicRelationType(toString(payload["secondary_relation_type"])) {
+	case "cause_effect", "progression", "context":
+	default:
+		delete(payload, "secondary_topic_key")
+		delete(payload, "secondary_topic_label")
+		delete(payload, "secondary_callback_hint")
+		delete(payload, "secondary_relation_type")
+		return payload, nil
+	}
+
+	secondaryTopic, err := d.repo.GetConversationTopic(ctx, task.UserID, task.SessionID, secondaryKey)
+	if err != nil {
+		return nil, err
+	}
+	if !isSecondaryTopicRecallable(task, secondaryTopic) {
+		delete(payload, "secondary_topic_key")
+		delete(payload, "secondary_topic_label")
+		delete(payload, "secondary_callback_hint")
+		delete(payload, "secondary_relation_type")
+		return payload, nil
+	}
+
+	if label := strings.TrimSpace(secondaryTopic.TopicLabel); label != "" {
+		payload["secondary_topic_label"] = label
+	}
+	if hint := strings.TrimSpace(secondaryTopic.CallbackHint); hint != "" {
+		payload["secondary_callback_hint"] = hint
+	}
+	return payload, nil
+}
+
+func isSecondaryTopicRecallable(task repo.ProactiveTask, topic repo.ConversationTopic) bool {
+	if strings.TrimSpace(topic.TopicKey) == "" {
+		return false
+	}
+	if strings.TrimSpace(topic.Status) != "active" {
+		return false
+	}
+	if !task.CreatedAt.IsZero() && topic.LastDiscussedAt != nil && topic.LastDiscussedAt.After(task.CreatedAt.Add(30*time.Minute)) {
+		return false
+	}
+	if !task.CreatedAt.IsZero() && topic.LastRecalledAt != nil && topic.LastRecalledAt.After(task.CreatedAt) {
+		return false
+	}
+	return true
 }
 
 // dispatchOutbound 把 outbound_queue 真正发送成 assistant 消息，并处理失败重试。

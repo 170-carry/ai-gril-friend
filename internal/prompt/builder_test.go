@@ -28,7 +28,7 @@ func TestPromptBuilder_DeterministicAndWithinBudget(t *testing.T) {
 		Persona: PersonaConfig{
 			BotName:           "Luna",
 			UserName:          "Carry",
-			RelationshipStage: "close",
+			RelationshipStage: "trust_building",
 			Emotion:           "anxious",
 			EmotionIntensity:  0.75,
 			UserProfile:       strings.Repeat("用户是后端工程师。", 30),
@@ -90,6 +90,26 @@ func TestPromptBuilder_InjectsConversationPlan(t *testing.T) {
 	}
 	if !strings.Contains(out.Messages[0].Content, "CONVERSATION_PLAN") {
 		t.Fatalf("expected conversation plan injected into system prompt")
+	}
+}
+
+func TestPromptBuilder_InjectsTopicContext(t *testing.T) {
+	builder := NewBuilder()
+	out, err := builder.Build(context.Background(), BuildRequest{
+		UserID:      "u1",
+		SessionID:   "s1",
+		UserMessage: "在吗",
+		Budget:      DefaultBudgetConfig(),
+		Persona: PersonaConfig{
+			TopicContext: "- 未完话题「面试准备」：昨天你说最担心系统设计部分。",
+			Language:     "zh-CN",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	if !strings.Contains(out.Messages[0].Content, "[Active Topics]") {
+		t.Fatalf("expected topic context injected into system prompt")
 	}
 }
 

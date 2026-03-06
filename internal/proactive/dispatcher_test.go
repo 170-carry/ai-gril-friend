@@ -15,12 +15,15 @@ type fakeDispatcherRepo struct {
 	tasks                   []repo.ProactiveTask
 	outbound                []repo.OutboundQueueItem
 	state                   repo.ProactiveState
+	topic                   repo.ConversationTopic
+	topicsByKey             map[string]repo.ConversationTopic
 	cancelledTaskIDs        []int64
 	rescheduledTaskIDs      []int64
 	rescheduledOutboundIDs  []int64
 	permanentFailedQueueIDs []int64
 	queuedTaskIDs           []int64
 	enqueuedOutboundCount   int
+	enqueuedOutboundItems   []repo.OutboundQueueItem
 	deliverErr              error
 }
 
@@ -34,6 +37,16 @@ func (f *fakeDispatcherRepo) ClaimDueTasks(ctx context.Context, now time.Time, l
 
 func (f *fakeDispatcherRepo) GetState(ctx context.Context, userID string) (repo.ProactiveState, error) {
 	return f.state, nil
+}
+
+func (f *fakeDispatcherRepo) GetConversationTopic(ctx context.Context, userID, sessionID, topicKey string) (repo.ConversationTopic, error) {
+	if len(f.topicsByKey) > 0 {
+		if topic, ok := f.topicsByKey[topicKey]; ok {
+			return topic, nil
+		}
+		return repo.ConversationTopic{}, nil
+	}
+	return f.topic, nil
 }
 
 func (f *fakeDispatcherRepo) RescheduleTask(ctx context.Context, taskID int64, nextAttemptAt time.Time, lastError string) error {
@@ -57,6 +70,7 @@ func (f *fakeDispatcherRepo) MarkTaskFailed(ctx context.Context, taskID int64, l
 
 func (f *fakeDispatcherRepo) EnqueueOutbound(ctx context.Context, item repo.OutboundQueueItem) (int64, bool, error) {
 	f.enqueuedOutboundCount++
+	f.enqueuedOutboundItems = append(f.enqueuedOutboundItems, item)
 	return int64(100 + f.enqueuedOutboundCount), true, nil
 }
 
@@ -180,5 +194,101 @@ func TestDispatcher_DispatchOutboundMarksPermanentFailureAfterMaxAttempts(t *tes
 	}
 	if len(repository.permanentFailedQueueIDs) != 1 || repository.permanentFailedQueueIDs[0] != 22 {
 		t.Fatalf("expected permanent failure marked, got %+v", repository.permanentFailedQueueIDs)
+	}
+}
+
+func TestDispatcher_StageDueTasksCancelsResolvedTopicRecall(t *testing.T) {
+	t.Parallel()
+
+	repository := &fakeDispatcherRepo{
+		state: repo.ProactiveState{
+			Enabled: true,
+		},
+		topic: repo.ConversationTopic{
+			TopicKey: "interview_prep",
+			Status:   "resolved",
+		},
+		tasks: []repo.ProactiveTask{
+			{
+				ID:        41,
+				UserID:    "u1",
+				SessionID: "s1",
+				TaskType:  "topic_reengage",
+				Reason:    "未完话题适合稍后自然回钩",
+				DedupKey:  "topic_reengage_x",
+				RunAt:     time.Now(),
+				Payload: map[string]any{
+					"topic_key":   "interview_prep",
+					"topic_label": "面试准备",
+				},
+			},
+		},
+	}
+	dispatcher := NewDispatcher(repository, DispatcherConfig{Enabled: true})
+
+	staged, err := dispatcher.stageDueTasks(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("stageDueTasks returned error: %v", err)
+	}
+	if staged != 0 {
+		t.Fatalf("expected resolved topic recall not staged, got %d", staged)
+	}
+	if len(repository.cancelledTaskIDs) != 1 || repository.cancelledTaskIDs[0] != 41 {
+		t.Fatalf("expected resolved topic task cancelled, got %+v", repository.cancelledTaskIDs)
+	}
+}
+
+func TestDispatcher_StageDueTasksStripsStaleSecondaryTopic(t *testing.T) {
+	t.Parallel()
+
+	repository := &fakeDispatcherRepo{
+		state: repo.ProactiveState{
+			Enabled: true,
+		},
+		topicsByKey: map[string]repo.ConversationTopic{
+			"work_conflict": {
+				TopicKey: "work_conflict",
+				Status:   "active",
+			},
+			"sleep_state": {
+				TopicKey: "sleep_state",
+				Status:   "resolved",
+			},
+		},
+		tasks: []repo.ProactiveTask{
+			{
+				ID:        51,
+				UserID:    "u1",
+				SessionID: "s1",
+				TaskType:  "topic_reengage",
+				Reason:    "未完话题适合稍后自然回钩",
+				DedupKey:  "topic_reengage_secondary_x",
+				RunAt:     time.Now(),
+				Payload: map[string]any{
+					"topic_key":               "work_conflict",
+					"topic_label":             "工作冲突",
+					"secondary_topic_key":     "sleep_state",
+					"secondary_topic_label":   "睡眠状态",
+					"secondary_relation_type": "cause_effect",
+					"secondary_callback_hint": "结果现在完全睡不着",
+				},
+			},
+		},
+	}
+	dispatcher := NewDispatcher(repository, DispatcherConfig{Enabled: true})
+
+	staged, err := dispatcher.stageDueTasks(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("stageDueTasks returned error: %v", err)
+	}
+	if staged != 1 {
+		t.Fatalf("expected task staged, got %d", staged)
+	}
+	if len(repository.enqueuedOutboundItems) != 1 {
+		t.Fatalf("expected one outbound item, got %d", len(repository.enqueuedOutboundItems))
+	}
+	payload := repository.enqueuedOutboundItems[0].Payload
+	if _, ok := payload["secondary_topic_key"]; ok {
+		t.Fatalf("expected stale secondary topic to be stripped, got %+v", payload)
 	}
 }

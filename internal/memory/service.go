@@ -13,6 +13,7 @@ import (
 	"ai-gf/internal/memory/ranking"
 	"ai-gf/internal/proactive"
 	"ai-gf/internal/repo"
+	"ai-gf/internal/signals"
 )
 
 // savedEvent 表示本轮刚写入的真实 life_event，供主动提醒任务引用。
@@ -28,6 +29,7 @@ type Service struct {
 	proactiveScheduler proactive.Scheduler
 	extractor          *extractor.Extractor
 	ranker             *ranking.Ranker
+	matcher            *signals.Matcher
 	cfg                Config
 }
 
@@ -40,8 +42,16 @@ func NewService(repository repo.MemoryRepository, embedder Embedder, proactiveSc
 		proactiveScheduler: proactiveScheduler,
 		extractor:          extractor.New(),
 		ranker:             ranking.NewRanker(cfg.Ranking),
+		matcher:            signals.NewMatcher(embedder),
 		cfg:                cfg,
 	}
+}
+
+func (s *Service) UseSignalAnalyzer(analyzer signals.Analyzer) {
+	if s == nil || s.matcher == nil {
+		return
+	}
+	s.matcher.SetAnalyzer(analyzer)
 }
 
 // BuildContext 在对话前构建可注入 PromptBuilder 的长记忆上下文。
@@ -67,11 +77,23 @@ func (s *Service) BuildContext(ctx context.Context, req ContextRequest) (Context
 	if err != nil {
 		return ContextResult{}, err
 	}
+	relationshipState, err := s.repo.GetRelationshipState(ctx, req.UserID)
+	if err != nil {
+		return ContextResult{}, err
+	}
 	events, err := s.repo.ListUpcomingEvents(ctx, req.UserID, req.Now, s.cfg.EventWindowDays, 8)
 	if err != nil {
 		return ContextResult{}, err
 	}
 	events = filterUpcomingEventsByImportance(events, s.cfg.EventMinImportance)
+	topics, err := s.repo.ListConversationTopics(ctx, req.UserID, req.SessionID, 8)
+	if err != nil {
+		return ContextResult{}, err
+	}
+	topicEdges, err := s.repo.ListConversationTopicEdges(ctx, req.UserID, req.SessionID, collectTopicKeys(topics), 16)
+	if err != nil {
+		return ContextResult{}, err
+	}
 
 	semanticChunks, _ := s.loadSemanticCandidates(ctx, req.UserID, req.UserMessage)
 
@@ -100,13 +122,18 @@ func (s *Service) BuildContext(ctx context.Context, req ContextRequest) (Context
 	}
 
 	return ContextResult{
-		UserProfile:      formatProfile(profile),
-		UserPreferences:  formatPreferences(preferences),
-		UserBoundaries:   formatBoundaries(boundaries),
-		ImportantEvents:  formatEvents(events),
-		RelevantMemories: formatRankedMemories(rankResult.Memories),
-		MemoryIDs:        memoryIDs,
-		RankTrace:        rankResult.Trace,
+		UserProfile:         formatProfile(profile),
+		UserPreferences:     formatPreferences(preferences),
+		UserBoundaries:      formatBoundaries(boundaries),
+		ImportantEvents:     formatEvents(events),
+		TopicContext:        formatTopicContext(topics, topicEdges),
+		RelevantMemories:    formatRankedMemories(rankResult.Memories),
+		RelationshipSummary: formatRelationshipState(relationshipState),
+		RelationshipState:   buildRelationshipSnapshot(relationshipState),
+		ActiveTopics:        buildTopicSnapshots(topics, topicEdges),
+		TopicGraph:          buildTopicEdgeSnapshots(topicEdges),
+		MemoryIDs:           memoryIDs,
+		RankTrace:           rankResult.Trace,
 	}, nil
 }
 
@@ -154,6 +181,9 @@ func (s *Service) ProcessTurn(ctx context.Context, in TurnInput) error {
 		return err
 	}
 	if err := s.executePlannedActions(ctx, in.UserID, in.SessionID, in.UserMessageID, in.Now, in.PlannedActions); err != nil {
+		return err
+	}
+	if err := s.updateRelationshipState(ctx, in); err != nil {
 		return err
 	}
 	return nil
@@ -208,12 +238,24 @@ func (s *Service) executePlannedActions(ctx context.Context, userID, sessionID s
 			if err := s.executeSaveSemanticMemory(ctx, userID, action.Params, "conversation_plan_action", 3, 0.85, false); err != nil {
 				return err
 			}
+		case "TRACK_TOPIC":
+			if err := s.executeTrackTopic(ctx, userID, sessionID, sourceMessageID, now, action.Params); err != nil {
+				return err
+			}
+		case "LINK_TOPICS":
+			if err := s.executeLinkTopics(ctx, userID, sessionID, now, action.Params); err != nil {
+				return err
+			}
 		case "SCHEDULE_EVENT_REMINDER":
 			if err := s.executeScheduleEventReminder(ctx, userID, sessionID, sourceMessageID, now, action.Params, action.Reason, eventTimes); err != nil {
 				return err
 			}
 		case "SCHEDULE_CARE_FOLLOWUP":
 			if err := s.executeScheduleCareFollowup(ctx, userID, sessionID, sourceMessageID, now, action.Params, action.Reason); err != nil {
+				return err
+			}
+		case "SCHEDULE_TOPIC_REENGAGE":
+			if err := s.executeScheduleTopicReengage(ctx, userID, sessionID, sourceMessageID, now, action.Params, action.Reason); err != nil {
 				return err
 			}
 		default:

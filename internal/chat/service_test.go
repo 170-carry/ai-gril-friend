@@ -261,11 +261,24 @@ func TestBuildPromptDebug_ContainsMemoryContext(t *testing.T) {
 	providerStub := &fakeProvider{}
 	memoryStub := &fakeMemoryEngine{
 		contextResp: memory.ContextResult{
-			UserProfile:      "昵称：小宇",
-			UserPreferences:  "- game: dota2",
-			UserBoundaries:   "- ex relationship",
-			ImportantEvents:  "- 03-06 14:00 面试",
-			RelevantMemories: "- [id:m_7 conf:0.88 topic:preference] 用户喜欢 dota2",
+			UserProfile:         "昵称：小宇",
+			UserPreferences:     "- game: dota2",
+			UserBoundaries:      "- ex relationship",
+			ImportantEvents:     "- 03-06 14:00 面试",
+			RelevantMemories:    "- [id:m_7 conf:0.88 topic:preference] 用户喜欢 dota2",
+			RelationshipSummary: "- 当前阶段：familiar\n- familiarity=0.44 intimacy=0.48 trust=0.62 flirt=0.12 boundary_risk=0.08 support_need=0.30\n- playfulness_threshold=0.26 interaction_heat=0.40",
+			RelationshipState: memory.RelationshipSnapshot{
+				Stage:           "familiar",
+				Familiarity:     0.44,
+				Intimacy:        0.48,
+				Trust:           0.62,
+				Flirt:           0.12,
+				BoundaryRisk:    0.08,
+				SupportNeed:     0.30,
+				Playfulness:     0.26,
+				InteractionHeat: 0.40,
+				Summary:         "- 当前阶段：familiar",
+			},
 		},
 	}
 	service := NewService(repoStub, providerStub, memoryStub, nil, 0.8, 20, prompt.DefaultBudgetConfig())
@@ -295,6 +308,56 @@ func TestBuildPromptDebug_ContainsMemoryContext(t *testing.T) {
 	}
 	if out.PersonaAfterMerge.UserProfile != "昵称：小宇" {
 		t.Fatalf("expected merged persona profile, got %s", out.PersonaAfterMerge.UserProfile)
+	}
+	if out.PersonaAfterMerge.RelationshipStage != "familiar" {
+		t.Fatalf("expected merged relationship stage from memory, got %s", out.PersonaAfterMerge.RelationshipStage)
+	}
+	if out.PersonaAfterMerge.RelationshipTrust != 0.62 {
+		t.Fatalf("expected merged relationship trust, got %.2f", out.PersonaAfterMerge.RelationshipTrust)
+	}
+}
+
+// TestBuildPromptDebug_ExplicitRelationshipStageWins 验证显式传入的关系阶段会覆盖存储态阶段。
+func TestBuildPromptDebug_ExplicitRelationshipStageWins(t *testing.T) {
+	repoStub := &fakeRepo{
+		listResult: []repo.ChatMessage{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: "hello"},
+		},
+	}
+	providerStub := &fakeProvider{}
+	memoryStub := &fakeMemoryEngine{
+		contextResp: memory.ContextResult{
+			RelationshipSummary: "- 当前阶段：familiar",
+			RelationshipState: memory.RelationshipSnapshot{
+				Stage:           "familiar",
+				Intimacy:        0.40,
+				Trust:           0.55,
+				Playfulness:     0.20,
+				InteractionHeat: 0.25,
+				Summary:         "- 当前阶段：familiar",
+			},
+		},
+	}
+	service := NewService(repoStub, providerStub, memoryStub, nil, 0.8, 20, prompt.DefaultBudgetConfig())
+
+	out, err := service.BuildPromptDebug(context.Background(), DebugPromptInput{
+		UserID:    "u1",
+		SessionID: "s1",
+		Message:   "test",
+		Persona: prompt.PersonaConfig{
+			RelationshipStage:         "romantic",
+			RelationshipStageProvided: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildPromptDebug returned error: %v", err)
+	}
+	if out.PersonaAfterMerge.RelationshipStage != "romantic" {
+		t.Fatalf("expected explicit relationship stage kept, got %s", out.PersonaAfterMerge.RelationshipStage)
+	}
+	if out.PersonaAfterMerge.RelationshipTrust != 0.55 {
+		t.Fatalf("expected stored relationship metrics still merged, got %.2f", out.PersonaAfterMerge.RelationshipTrust)
 	}
 }
 

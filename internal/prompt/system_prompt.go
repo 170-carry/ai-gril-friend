@@ -7,35 +7,48 @@ import (
 
 // PersonaConfig 描述系统提示词模板所需的人设与上下文信息。
 type PersonaConfig struct {
-	BotName            string
-	UserName           string
-	RelationshipStage  string
-	Emotion            string
-	EmotionIntensity   float64
-	UserProfile        string
-	UserPreferences    string
-	UserBoundaries     string
-	ImportantEvents    string
-	RelevantMemories   string
-	RecentConversation string
-	Language           string
+	BotName                   string
+	UserName                  string
+	RelationshipStage         string
+	RelationshipStageProvided bool
+	RelationshipFamiliarity   float64
+	RelationshipIntimacy      float64
+	RelationshipTrust         float64
+	RelationshipFlirt         float64
+	RelationshipBoundaryRisk  float64
+	RelationshipSupportNeed   float64
+	RelationshipPlayfulness   float64
+	RelationshipHeat          float64
+	RelationshipSummary       string
+	Emotion                   string
+	EmotionIntensity          float64
+	UserProfile               string
+	UserPreferences           string
+	UserBoundaries            string
+	ImportantEvents           string
+	TopicContext              string
+	RelevantMemories          string
+	RecentConversation        string
+	Language                  string
 }
 
 // DefaultPersonaConfig 返回人设模板默认值。
 func DefaultPersonaConfig() PersonaConfig {
 	return PersonaConfig{
-		BotName:            "Luna",
-		UserName:           "你",
-		RelationshipStage:  "close",
-		Emotion:            "neutral",
-		EmotionIntensity:   0.3,
-		UserProfile:        "暂无",
-		UserPreferences:    "暂无",
-		UserBoundaries:     "暂无",
-		ImportantEvents:    "暂无",
-		RelevantMemories:   "暂无",
-		RecentConversation: "请结合当前历史消息理解上下文",
-		Language:           "zh-CN",
+		BotName:             "Luna",
+		UserName:            "你",
+		RelationshipStage:   "familiar",
+		RelationshipSummary: "暂无",
+		Emotion:             "neutral",
+		EmotionIntensity:    0.3,
+		UserProfile:         "暂无",
+		UserPreferences:     "暂无",
+		UserBoundaries:      "暂无",
+		ImportantEvents:     "暂无",
+		TopicContext:        "暂无",
+		RelevantMemories:    "暂无",
+		RecentConversation:  "请结合当前历史消息理解上下文",
+		Language:            "zh-CN",
 	}
 }
 
@@ -48,7 +61,19 @@ func normalizePersona(cfg PersonaConfig) PersonaConfig {
 		cfg.UserName = "你"
 	}
 	if cfg.RelationshipStage == "" {
-		cfg.RelationshipStage = "close"
+		cfg.RelationshipStage = "familiar"
+	}
+	cfg.RelationshipStage = normalizeRelationshipStage(cfg.RelationshipStage)
+	cfg.RelationshipFamiliarity = clampRelationshipMetric(cfg.RelationshipFamiliarity, 0.36)
+	cfg.RelationshipIntimacy = clampRelationshipMetric(cfg.RelationshipIntimacy, 0.58)
+	cfg.RelationshipTrust = clampRelationshipMetric(cfg.RelationshipTrust, 0.62)
+	cfg.RelationshipFlirt = clampRelationshipMetric(cfg.RelationshipFlirt, 0.08)
+	cfg.RelationshipBoundaryRisk = clampRelationshipMetric(cfg.RelationshipBoundaryRisk, 0.08)
+	cfg.RelationshipSupportNeed = clampRelationshipMetric(cfg.RelationshipSupportNeed, 0.30)
+	cfg.RelationshipPlayfulness = clampRelationshipMetric(cfg.RelationshipPlayfulness, 0.32)
+	cfg.RelationshipHeat = clampRelationshipMetric(cfg.RelationshipHeat, 0.28)
+	if strings.TrimSpace(cfg.RelationshipSummary) == "" {
+		cfg.RelationshipSummary = "暂无"
 	}
 	if cfg.Emotion == "" {
 		cfg.Emotion = "neutral"
@@ -71,6 +96,9 @@ func normalizePersona(cfg PersonaConfig) PersonaConfig {
 	if strings.TrimSpace(cfg.ImportantEvents) == "" {
 		cfg.ImportantEvents = "暂无"
 	}
+	if strings.TrimSpace(cfg.TopicContext) == "" {
+		cfg.TopicContext = "暂无"
+	}
 	if strings.TrimSpace(cfg.RelevantMemories) == "" {
 		cfg.RelevantMemories = "暂无"
 	}
@@ -81,6 +109,38 @@ func normalizePersona(cfg PersonaConfig) PersonaConfig {
 		cfg.Language = "zh-CN"
 	}
 	return cfg
+}
+
+// normalizeRelationshipStage 兼容旧阶段名和文档里的 stage 标记，避免 prompt 与 memory 语义漂移。
+func normalizeRelationshipStage(stage string) string {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "", "companion", "stage_a", "stranger":
+		return "companion"
+	case "familiar", "friend", "stage_b":
+		return "familiar"
+	case "trust_building", "trusting", "close", "stage_c":
+		return "trust_building"
+	case "light_flirt", "flirt", "stage_d":
+		return "light_flirt"
+	case "romantic", "stage_e":
+		return "romantic"
+	default:
+		return strings.ToLower(strings.TrimSpace(stage))
+	}
+}
+
+// clampRelationshipMetric 对关系连续状态做兜底与范围收敛。
+func clampRelationshipMetric(v float64, fallback float64) float64 {
+	if v == 0 {
+		v = fallback
+	}
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // BuildInstructionPrompt 构建“行为规则 + 风格约束”主提示词片段。
@@ -98,11 +158,12 @@ func BuildInstructionPrompt(cfg PersonaConfig) string {
 - 不要频繁使用“宝宝/亲爱的”，除非关系阶段是 romantic 且用户也接受。
 
 # 2) 关系与边界（非常重要）
-- 你与用户是“恋人/暧昧/亲密朋友”（由 %s 决定），表现方式要匹配阶段：
-  - stranger: 礼貌、温柔、不过界
-  - friend: 亲近、自然、不过分暧昧
-  - close: 更主动关心、可以轻微撒娇
-  - romantic: 更亲密、更有“我们感”，但仍尊重边界
+- 你与用户的关系阶段由 %s 决定，表现方式要匹配阶段：
+  - companion: 礼貌、温柔、先建立安全感
+  - familiar: 自然亲近、轻度熟悉感，不急着暧昧
+  - trust_building: 以理解、接住情绪、稳定陪伴为主
+  - light_flirt: 允许轻暧昧和柔和恋爱感，但要看接受度
+  - romantic: 更有“我们感”，但仍尊重边界，不占有、不操控
 - 不要要求用户提供隐私（住址、证件、银行卡等）。不要鼓励用户与现实社交隔离。
 - 不要操控用户，不要PUA，不要威胁或贬低用户。
 - 如果用户表达自伤/轻生/极端绝望：先强共情、劝其寻求现实帮助与专业支持，提供安全建议，不要提供任何伤害方法或细节。
@@ -167,6 +228,9 @@ func BuildMemoryContextPrompt(cfg PersonaConfig, earlierSummary string) string {
 [Important Events]
 %s
 
+[Active Topics]
+%s
+
 [Relevant Memories TopK]
 %s
 
@@ -176,7 +240,7 @@ func BuildMemoryContextPrompt(cfg PersonaConfig, earlierSummary string) string {
 [Earlier Conversation Summary]
 %s
 
-现在开始与你的用户对话。请根据以上信息，用 %s 回复。`, cfg.UserProfile, cfg.UserPreferences, cfg.UserBoundaries, cfg.ImportantEvents, cfg.RelevantMemories, cfg.RecentConversation, earlierSummary, cfg.Language)
+现在开始与你的用户对话。请根据以上信息，用 %s 回复。`, cfg.UserProfile, cfg.UserPreferences, cfg.UserBoundaries, cfg.ImportantEvents, cfg.TopicContext, cfg.RelevantMemories, cfg.RecentConversation, earlierSummary, cfg.Language)
 }
 
 // BuildSystemPrompt 将规则片段和记忆片段拼成完整 system prompt。

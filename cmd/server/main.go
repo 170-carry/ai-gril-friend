@@ -8,12 +8,14 @@ import (
 	"ai-gf/internal/api"
 	"ai-gf/internal/chat"
 	"ai-gf/internal/config"
+	"ai-gf/internal/conversation"
 	"ai-gf/internal/embedding"
 	"ai-gf/internal/llm"
 	"ai-gf/internal/memory"
 	"ai-gf/internal/proactive"
 	"ai-gf/internal/prompt"
 	"ai-gf/internal/repo"
+	"ai-gf/internal/signals"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -65,6 +67,8 @@ func main() {
 
 	proactiveService := proactive.NewService(proactiveRepo, proactive.DefaultConfig())
 	memoryService := memory.NewService(memoryRepo, memoryEmbedder, proactiveService, memory.DefaultConfig())
+	signalAnalyzer := signals.NewLLMAnalyzer(provider)
+	memoryService.UseSignalAnalyzer(signalAnalyzer)
 	var turnProcessor memory.TurnProcessor
 	if cfg.MemoryAsyncEnabled {
 		turnProcessor = memory.NewAsyncProcessor(memoryService, memory.AsyncProcessorConfig{
@@ -85,7 +89,9 @@ func main() {
 		SystemRatio:     cfg.PromptSystemRatio,
 		MemoryRatio:     cfg.PromptMemoryRatio,
 		HistoryRatio:    cfg.PromptHistoryRatio,
-	})
+	}, memoryEmbedder)
+	chatService.UseSignalAnalyzer(signalAnalyzer)
+	chatService.UseTopicSummarizer(conversation.NewLLMTopicSummarizer(provider))
 
 	// 主动消息调度器：后台扫描到期提醒/回访并写入 outbox。
 	dispatcher := proactive.NewDispatcher(proactiveRepo, proactive.DispatcherConfig{

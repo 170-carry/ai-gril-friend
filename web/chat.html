@@ -709,6 +709,44 @@
       gap: 10px;
     }
 
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .stat-card {
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.84);
+      border: 1px solid rgba(98, 117, 154, 0.12);
+      box-shadow: 0 12px 24px rgba(54, 72, 100, 0.06);
+    }
+
+    .stat-card strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--teal);
+    }
+
+    .stat-card span {
+      display: block;
+      font-size: 21px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--text);
+    }
+
+    .tiny-note {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.65;
+      font-size: 13px;
+    }
+
     .support-item {
       padding: 14px 16px;
       border-radius: 18px;
@@ -917,6 +955,13 @@
       line-height: 1.7;
     }
 
+    .action-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
     @keyframes drift {
       0%, 100% {
         transform: translate3d(0, 0, 0) scale(1);
@@ -1062,6 +1107,7 @@
             </div>
             <div class="utility-row">
               <button id="pullBtn" type="button" class="utility-btn">拉取主动消息</button>
+              <button id="runtimeBtn" type="button" class="utility-btn">刷新运行时</button>
               <button id="debugBtn" type="button" class="utility-btn">观察室</button>
               <button id="clearBtn" type="button" class="utility-btn">清空对话</button>
             </div>
@@ -1113,6 +1159,14 @@
         </section>
 
         <section class="insight-card">
+          <details id="relationshipPanel" class="debug-panel">
+            <summary>观察室 · Relationship State</summary>
+            <pre id="relationshipView" class="debug-view">点击“观察室”后，这里会出现 relationship_state 的连续分数、合并结果和 CE 消费情况。</pre>
+          </details>
+          <details id="proactivePanel" class="debug-panel">
+            <summary>观察室 · Proactive Runtime</summary>
+            <pre id="proactiveView" class="debug-view">点击“刷新运行时”后，这里会出现 proactive_state、tasks、task_decisions 和 outbox 状态。</pre>
+          </details>
           <details id="planPanel" class="debug-panel">
             <summary>观察室 · Conversation Plan</summary>
             <pre id="planView" class="debug-view">点击“观察室”后，这里会出现 intent、mode、tone、actions 等规划信息。</pre>
@@ -1149,6 +1203,48 @@
             <div class="support-item">如果你开启主动消息，她会在服务端有内容时主动来找你。</div>
           </div>
         </section>
+
+        <section class="rail-card">
+          <p class="section-kicker">Relationship</p>
+          <h3>关系状态运行时</h3>
+          <div class="stat-grid">
+            <div class="stat-card">
+              <strong>Stage</strong>
+              <span id="relationshipStageValue">close</span>
+            </div>
+            <div class="stat-card">
+              <strong>Intimacy</strong>
+              <span id="relationshipIntimacyValue">0.58</span>
+            </div>
+            <div class="stat-card">
+              <strong>Trust</strong>
+              <span id="relationshipTrustValue">0.62</span>
+            </div>
+            <div class="stat-card">
+              <strong>Playfulness</strong>
+              <span id="relationshipPlayfulnessValue">0.32</span>
+            </div>
+            <div class="stat-card">
+              <strong>Heat</strong>
+              <span id="relationshipHeatValue">0.28</span>
+            </div>
+            <div class="stat-card">
+              <strong>Total Turns</strong>
+              <span id="relationshipTurnsValue">0</span>
+            </div>
+          </div>
+          <p id="relationshipSummaryPreview" class="tiny-note">这里会显示服务端 relationship_state 的摘要。关闭“发送 relationship_stage”后，可以直接测试存储态阶段接管效果。</p>
+        </section>
+
+        <section class="rail-card">
+          <p class="section-kicker">Proactive</p>
+          <h3>主动系统运行时</h3>
+          <div class="support-list">
+            <div id="proactiveStatePreview" class="support-item">这里会显示主动消息是否开启、冷却时间和免打扰窗口。</div>
+            <div id="proactiveTaskPreview" class="support-item">这里会显示最近 proactive tasks / outbound queue 的状态概览。</div>
+            <div id="proactiveDecisionPreview" class="support-item">这里会显示 send / defer / cancel 的最近决策摘要。</div>
+          </div>
+        </section>
       </aside>
     </div>
   </div>
@@ -1183,6 +1279,14 @@
             <div class="field span-2">
               <label for="streamUrl">Outbox Stream URL (SSE)</label>
               <input id="streamUrl" value="http://localhost:9901/chat/outbox/stream">
+            </div>
+            <div class="field">
+              <label for="proactiveStateUrl">Proactive State URL</label>
+              <input id="proactiveStateUrl" value="http://localhost:9901/chat/proactive/state">
+            </div>
+            <div class="field">
+              <label for="proactiveDebugUrl">Proactive Debug URL</label>
+              <input id="proactiveDebugUrl" value="http://localhost:9901/chat/proactive/debug">
             </div>
             <div class="field">
               <label for="modelId">model_id（仅 Debug 用）</label>
@@ -1235,6 +1339,12 @@
                 <option value="lonely">lonely</option>
                 <option value="happy">happy</option>
               </select>
+            </div>
+            <div class="field span-2">
+              <div class="checkbox-stack">
+                <strong>Relationship Runtime</strong>
+                <label class="toggle"><input id="sendRelationshipStage" type="checkbox" checked> <span>请求里发送 `relationship_stage`（关闭后，使用服务端存储态阶段）</span></label>
+              </div>
             </div>
             <div class="field span-2">
               <label for="intensity">emotion_intensity (0~1)</label>
@@ -1300,6 +1410,40 @@
               <input id="pullIntervalSec" type="number" min="1" max="60" step="1" value="3">
               <small>开启自动拉取后会优先尝试 SSE；如果浏览器或服务端不支持，会自动回退到短轮询。</small>
             </div>
+            <div class="field">
+              <div class="checkbox-stack">
+                <strong>Proactive State</strong>
+                <label class="toggle"><input id="proactiveEnabled" type="checkbox" checked> <span>服务端允许主动消息</span></label>
+                <label class="toggle"><input id="quietHoursEnabled" type="checkbox"> <span>开启免打扰时间</span></label>
+              </div>
+            </div>
+            <div class="field">
+              <div class="checkbox-stack">
+                <strong>Runtime Sync</strong>
+                <label class="toggle"><input id="autoRuntimeRefresh" type="checkbox" checked> <span>Debug 后自动刷新 relationship / proactive 运行时</span></label>
+              </div>
+            </div>
+            <div class="field">
+              <label for="proactiveTimezone">timezone</label>
+              <input id="proactiveTimezone" value="Asia/Shanghai">
+            </div>
+            <div class="field">
+              <label for="proactiveCooldownSec">cooldown_seconds</label>
+              <input id="proactiveCooldownSec" type="number" min="0" step="60" value="43200">
+            </div>
+            <div class="field">
+              <label for="quietStartMinute">quiet_start_minute</label>
+              <input id="quietStartMinute" type="number" min="0" max="1439" step="1" value="1380">
+            </div>
+            <div class="field">
+              <label for="quietEndMinute">quiet_end_minute</label>
+              <input id="quietEndMinute" type="number" min="0" max="1439" step="1" value="480">
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="loadProactiveStateBtn" type="button" class="mini-btn">读取主动设置</button>
+            <button id="saveProactiveStateBtn" type="button" class="mini-btn">保存主动设置</button>
+            <button id="refreshProactiveDebugBtn" type="button" class="mini-btn">刷新主动调试</button>
           </div>
           <div class="footer-note">设置无需单独保存。你可以一边调参数，一边在主界面观察聊天气质、Conversation Plan 和 Prompt Debug 的变化。</div>
         </section>
@@ -1310,6 +1454,8 @@
   <script>
     const PLAN_PLACEHOLDER = "点击“观察室”后，这里会出现 intent、mode、tone、actions 等规划信息。";
     const DEBUG_PLACEHOLDER = "点击“观察室”后，这里会出现 Prompt Debug、Memory Hits 和阶段报告。";
+    const RELATIONSHIP_PLACEHOLDER = "点击“观察室”后，这里会出现 relationship_state 的连续分数、合并结果和 CE 消费情况。";
+    const PROACTIVE_PLACEHOLDER = "点击“刷新运行时”后，这里会出现 proactive_state、tasks、task_decisions 和 outbox 状态。";
 
     const STAGE_LABELS = {
       stranger: "初见试探",
@@ -1343,12 +1489,15 @@
       debugUrl: document.getElementById("debugUrl"),
       outboxUrl: document.getElementById("outboxUrl"),
       streamUrl: document.getElementById("streamUrl"),
+      proactiveStateUrl: document.getElementById("proactiveStateUrl"),
+      proactiveDebugUrl: document.getElementById("proactiveDebugUrl"),
       modelId: document.getElementById("modelId"),
       userId: document.getElementById("userId"),
       sessionId: document.getElementById("sessionId"),
       botName: document.getElementById("botName"),
       userName: document.getElementById("userName"),
       stage: document.getElementById("stage"),
+      sendRelationshipStage: document.getElementById("sendRelationshipStage"),
       emotion: document.getElementById("emotion"),
       intensity: document.getElementById("intensity"),
       language: document.getElementById("language"),
@@ -1364,6 +1513,13 @@
       autoDebug: document.getElementById("autoDebug"),
       autoPull: document.getElementById("autoPull"),
       preferSSE: document.getElementById("preferSSE"),
+      autoRuntimeRefresh: document.getElementById("autoRuntimeRefresh"),
+      proactiveEnabled: document.getElementById("proactiveEnabled"),
+      quietHoursEnabled: document.getElementById("quietHoursEnabled"),
+      proactiveTimezone: document.getElementById("proactiveTimezone"),
+      proactiveCooldownSec: document.getElementById("proactiveCooldownSec"),
+      quietStartMinute: document.getElementById("quietStartMinute"),
+      quietEndMinute: document.getElementById("quietEndMinute"),
       pullIntervalSec: document.getElementById("pullIntervalSec"),
       scenarioMemory: document.getElementById("scenarioMemory"),
       scenarioBoundary: document.getElementById("scenarioBoundary"),
@@ -1373,6 +1529,7 @@
       sendBtn: document.getElementById("sendBtn"),
       debugBtn: document.getElementById("debugBtn"),
       pullBtn: document.getElementById("pullBtn"),
+      runtimeBtn: document.getElementById("runtimeBtn"),
       clearBtn: document.getElementById("clearBtn"),
       messages: document.getElementById("messages"),
       emptyState: document.getElementById("emptyState"),
@@ -1381,8 +1538,12 @@
       status: document.getElementById("status"),
       planView: document.getElementById("planView"),
       debugView: document.getElementById("debugView"),
+      relationshipView: document.getElementById("relationshipView"),
+      proactiveView: document.getElementById("proactiveView"),
       planPanel: document.getElementById("planPanel"),
       debugPanel: document.getElementById("debugPanel"),
+      relationshipPanel: document.getElementById("relationshipPanel"),
+      proactivePanel: document.getElementById("proactivePanel"),
       settingsModal: document.getElementById("settingsModal"),
       settingsBtn: document.getElementById("settingsBtn"),
       closeSettingsBtn: document.getElementById("closeSettingsBtn"),
@@ -1396,7 +1557,20 @@
       channelBadge: document.getElementById("channelBadge"),
       debugModeBadge: document.getElementById("debugModeBadge"),
       prefsPreview: document.getElementById("prefsPreview"),
-      memoryPreview: document.getElementById("memoryPreview")
+      memoryPreview: document.getElementById("memoryPreview"),
+      relationshipStageValue: document.getElementById("relationshipStageValue"),
+      relationshipIntimacyValue: document.getElementById("relationshipIntimacyValue"),
+      relationshipTrustValue: document.getElementById("relationshipTrustValue"),
+      relationshipPlayfulnessValue: document.getElementById("relationshipPlayfulnessValue"),
+      relationshipHeatValue: document.getElementById("relationshipHeatValue"),
+      relationshipTurnsValue: document.getElementById("relationshipTurnsValue"),
+      relationshipSummaryPreview: document.getElementById("relationshipSummaryPreview"),
+      proactiveStatePreview: document.getElementById("proactiveStatePreview"),
+      proactiveTaskPreview: document.getElementById("proactiveTaskPreview"),
+      proactiveDecisionPreview: document.getElementById("proactiveDecisionPreview"),
+      loadProactiveStateBtn: document.getElementById("loadProactiveStateBtn"),
+      saveProactiveStateBtn: document.getElementById("saveProactiveStateBtn"),
+      refreshProactiveDebugBtn: document.getElementById("refreshProactiveDebugBtn")
     };
 
     let sending = false;
@@ -1404,6 +1578,9 @@
     let outboxES = null;
     let outboxAfterId = 0;
     let outboxCursorKey = "";
+    let latestRelationshipRuntime = null;
+    let latestProactiveState = null;
+    let latestProactiveDebug = null;
 
     function trimText(text, maxLen) {
       const value = String(text || "").trim();
@@ -1440,6 +1617,7 @@
       els.sendBtn.disabled = active;
       els.debugBtn.disabled = active;
       els.pullBtn.disabled = active;
+      els.runtimeBtn.disabled = active;
       els.clearBtn.disabled = active;
     }
 
@@ -1476,7 +1654,9 @@
       const stageLabel = STAGE_LABELS[els.stage.value] || "默契靠近";
       const emotionLabel = EMOTION_LABELS[els.emotion.value] || "平静";
       const intensity = clamp01(els.intensity.value);
-      const channelText = !els.autoPull.checked
+      const channelText = !els.proactiveEnabled.checked
+        ? "主动消息 · 服务端关闭"
+        : !els.autoPull.checked
         ? "主动消息 · 已关闭"
         : (els.preferSSE.checked ? "主动消息 · SSE 优先" : "主动消息 · 轮询中");
       const prefs = trimText(els.prefs.value, 56);
@@ -1506,6 +1686,15 @@
       els.emptyTitle.textContent = "和 " + bot + " 开始一段柔和的对话";
       els.emptyText.textContent = bot + " 会结合关系阶段、情绪、记忆和偏好来回应你。说一句晚安、吐槽今天，或者只是说“陪我待会儿”都可以。";
       els.input.placeholder = "把今天的情绪、想法，或者一句晚安交给 " + bot;
+
+      if (!latestRelationshipRuntime) {
+        els.relationshipStageValue.textContent = els.stage.value || "close";
+        els.relationshipIntimacyValue.textContent = "0.58";
+        els.relationshipTrustValue.textContent = "0.62";
+        els.relationshipPlayfulnessValue.textContent = "0.32";
+        els.relationshipHeatValue.textContent = "0.28";
+        els.relationshipTurnsValue.textContent = "0";
+      }
     }
 
     function addBubble(role, text, suffix = "") {
@@ -1531,24 +1720,28 @@
     }
 
     function buildPayload(text, includeDebugFields = false) {
+      const persona = {
+        bot_name: els.botName.value.trim(),
+        user_name: els.userName.value.trim(),
+        emotion: els.emotion.value,
+        emotion_intensity: clamp01(els.intensity.value),
+        user_profile: els.profile.value.trim(),
+        user_preferences: els.prefs.value.trim(),
+        user_boundaries: els.boundaries.value.trim(),
+        important_events: els.events.value.trim(),
+        relevant_memories: els.memories.value.trim(),
+        recent_conversation: els.recentConv.value.trim(),
+        language: els.language.value.trim()
+      };
+      if (els.sendRelationshipStage.checked) {
+        persona.relationship_stage = els.stage.value;
+      }
+
       const payload = {
         user_id: els.userId.value.trim(),
         session_id: els.sessionId.value.trim(),
         message: text,
-        persona: {
-          bot_name: els.botName.value.trim(),
-          user_name: els.userName.value.trim(),
-          relationship_stage: els.stage.value,
-          emotion: els.emotion.value,
-          emotion_intensity: clamp01(els.intensity.value),
-          user_profile: els.profile.value.trim(),
-          user_preferences: els.prefs.value.trim(),
-          user_boundaries: els.boundaries.value.trim(),
-          important_events: els.events.value.trim(),
-          relevant_memories: els.memories.value.trim(),
-          recent_conversation: els.recentConv.value.trim(),
-          language: els.language.value.trim()
-        }
+        persona: persona
       };
 
       if (includeDebugFields) {
@@ -1590,9 +1783,79 @@
       return apiUrl;
     }
 
+    function resolveProactiveStateUrl() {
+      const direct = els.proactiveStateUrl.value.trim();
+      if (direct) return direct;
+      const apiUrl = els.apiUrl.value.trim();
+      if (apiUrl.endsWith("/chat")) return apiUrl + "/proactive/state";
+      if (apiUrl.endsWith("/chat/")) return apiUrl + "proactive/state";
+      return apiUrl;
+    }
+
+    function resolveProactiveDebugUrl() {
+      const direct = els.proactiveDebugUrl.value.trim();
+      if (direct) return direct;
+      const apiUrl = els.apiUrl.value.trim();
+      if (apiUrl.endsWith("/chat")) return apiUrl + "/proactive/debug";
+      if (apiUrl.endsWith("/chat/")) return apiUrl + "proactive/debug";
+      return apiUrl;
+    }
+
     function fmtNum(v) {
       if (typeof v !== "number" || Number.isNaN(v)) return "0";
       return Math.round(v * 10000) / 10000 + "";
+    }
+
+    function fmtMinuteClock(v) {
+      const minute = Number(v);
+      if (Number.isNaN(minute)) return "--:--";
+      const safe = Math.max(0, Math.min(1439, Math.round(minute)));
+      const hour = String(Math.floor(safe / 60)).padStart(2, "0");
+      const min = String(safe % 60).padStart(2, "0");
+      return hour + ":" + min;
+    }
+
+    function fmtDateTime(value) {
+      if (!value) return "(none)";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+    }
+
+    function valueOrFallback(value, fallback = "(none)") {
+      if (value == null) return fallback;
+      const text = String(value).trim();
+      return text || fallback;
+    }
+
+    function countByStatus(items) {
+      const out = {};
+      for (const item of (Array.isArray(items) ? items : [])) {
+        const status = valueOrFallback(item && item.status, "unknown");
+        out[status] = (out[status] || 0) + 1;
+      }
+      return out;
+    }
+
+    function summarizeStatusCounts(mapObj) {
+      const keys = Object.keys(mapObj || {});
+      if (!keys.length) return "(none)";
+      return keys.sort().map((key) => key + ":" + mapObj[key]).join(" / ");
+    }
+
+    function detectProactiveKind(payload) {
+      if (!payload || typeof payload !== "object") return "";
+      const kind = String(payload.kind || payload.task_type || "").trim();
+      if (!kind) return "";
+      if (kind === "event_reminder") return "提醒";
+      if (kind === "care_followup") return "回访";
+      return kind;
     }
 
     function fmtBudgetMap(title, mapObj) {
@@ -1614,6 +1877,7 @@
       }
 
       const tone = plan.tone || {};
+      const relationship = plan.relationship || {};
       const actions = Array.isArray(plan.actions) ? plan.actions : [];
       const structure = Array.isArray(plan.response_structure) ? plan.response_structure : [];
       const questions = Array.isArray(plan.questions) ? plan.questions : [];
@@ -1623,6 +1887,11 @@
       lines.push("intent_confidence: " + fmtNum(plan.intent_confidence));
       lines.push("mode: " + (plan.mode || ""));
       lines.push("state: " + (plan.current_state || "") + " -> " + (plan.next_state || ""));
+      lines.push("relationship: stage=" + valueOrFallback(relationship.stage, "(none)") +
+        ", intimacy=" + fmtNum(relationship.intimacy) +
+        ", trust=" + fmtNum(relationship.trust) +
+        ", playfulness=" + fmtNum(relationship.playfulness) +
+        ", heat=" + fmtNum(relationship.interaction_heat));
       lines.push("tone: warmth=" + fmtNum(tone.warmth) +
         ", playfulness=" + fmtNum(tone.playfulness) +
         ", directness=" + fmtNum(tone.directness) +
@@ -1675,6 +1944,207 @@
       els.planView.textContent = lines.join("\n");
     }
 
+    function renderRelationshipRuntime(snapshot, summary, sourceLabel = "") {
+      const stage = valueOrFallback(snapshot && snapshot.stage, els.stage.value || "close");
+      const intimacy = snapshot && typeof snapshot.intimacy === "number" ? snapshot.intimacy : 0.58;
+      const trust = snapshot && typeof snapshot.trust === "number" ? snapshot.trust : 0.62;
+      const playfulness = snapshot && typeof snapshot.playfulness === "number" ? snapshot.playfulness : 0.32;
+      const heat = snapshot && typeof snapshot.interaction_heat === "number" ? snapshot.interaction_heat : 0.28;
+      const totalTurns = snapshot && typeof snapshot.total_turns === "number" ? snapshot.total_turns : 0;
+      const lastInteractionAt = snapshot ? snapshot.last_interaction_at : "";
+      const textSummary = String(summary || snapshot && snapshot.summary || "").trim();
+
+      latestRelationshipRuntime = {
+        stage: stage,
+        intimacy: intimacy,
+        trust: trust,
+        playfulness: playfulness,
+        interaction_heat: heat,
+        total_turns: totalTurns,
+        last_interaction_at: lastInteractionAt,
+        summary: textSummary
+      };
+
+      els.relationshipStageValue.textContent = stage;
+      els.relationshipIntimacyValue.textContent = fmtNum(intimacy);
+      els.relationshipTrustValue.textContent = fmtNum(trust);
+      els.relationshipPlayfulnessValue.textContent = fmtNum(playfulness);
+      els.relationshipHeatValue.textContent = fmtNum(heat);
+      els.relationshipTurnsValue.textContent = String(totalTurns || 0);
+      els.relationshipSummaryPreview.textContent = textSummary || "还没有 relationship_state 摘要。先发几轮消息，再从 Debug 里观察服务端如何更新关系状态。";
+
+      const lines = [];
+      lines.push("Source: " + (sourceLabel || "runtime"));
+      lines.push("stage: " + stage);
+      lines.push("intimacy: " + fmtNum(intimacy));
+      lines.push("trust: " + fmtNum(trust));
+      lines.push("playfulness: " + fmtNum(playfulness));
+      lines.push("interaction_heat: " + fmtNum(heat));
+      lines.push("total_turns: " + totalTurns);
+      lines.push("last_interaction_at: " + fmtDateTime(lastInteractionAt));
+      lines.push("");
+      lines.push("summary:");
+      lines.push(textSummary || "(none)");
+
+      els.relationshipPanel.open = true;
+      els.relationshipView.textContent = lines.join("\n");
+    }
+
+    function buildRelationshipSnapshotFromDebug(result) {
+      const memoryContext = result && result.memory_context ? result.memory_context : {};
+      const mergedPersona = result && result.persona_after_merge ? result.persona_after_merge : {};
+      const plan = result && result.conversation_plan ? result.conversation_plan : {};
+      const memoryRelationship = memoryContext.relationship_state && typeof memoryContext.relationship_state === "object"
+        ? memoryContext.relationship_state
+        : {};
+      const planRelationship = plan.relationship && typeof plan.relationship === "object"
+        ? plan.relationship
+        : {};
+
+      return {
+        stage: mergedPersona.relationship_stage || memoryRelationship.stage || planRelationship.stage || els.stage.value,
+        intimacy: typeof mergedPersona.relationship_intimacy === "number" ? mergedPersona.relationship_intimacy : memoryRelationship.intimacy ?? planRelationship.intimacy,
+        trust: typeof mergedPersona.relationship_trust === "number" ? mergedPersona.relationship_trust : memoryRelationship.trust ?? planRelationship.trust,
+        playfulness: typeof mergedPersona.relationship_playfulness === "number" ? mergedPersona.relationship_playfulness : memoryRelationship.playfulness ?? planRelationship.playfulness,
+        interaction_heat: typeof mergedPersona.relationship_heat === "number" ? mergedPersona.relationship_heat : memoryRelationship.interaction_heat ?? planRelationship.interaction_heat,
+        total_turns: memoryRelationship.total_turns,
+        last_interaction_at: memoryRelationship.last_interaction_at,
+        summary: memoryContext.relationship_summary || mergedPersona.relationship_summary || memoryRelationship.summary || planRelationship.summary || ""
+      };
+    }
+
+    function renderProactiveState(state, sourceLabel = "") {
+      latestProactiveState = state && typeof state === "object" ? state : null;
+      const enabled = !!(state && state.enabled);
+      const quietEnabled = !!(state && state.quiet_hours_enabled);
+      const cooldown = Number(state && state.cooldown_seconds);
+      const lastAt = state ? state.last_proactive_at : "";
+      const lastReason = state ? state.last_proactive_reason : "";
+      const lastTaskType = state ? state.last_proactive_task_type : "";
+      const lastContent = state ? state.last_proactive_content : "";
+      const timezone = valueOrFallback(state && state.timezone, els.proactiveTimezone.value.trim() || "Asia/Shanghai");
+      const quietText = quietEnabled
+        ? (fmtMinuteClock(state.quiet_start_minute) + " - " + fmtMinuteClock(state.quiet_end_minute))
+        : "未开启";
+
+      els.proactiveStatePreview.textContent =
+        "主动消息：" + (enabled ? "开启" : "关闭") +
+        "；冷却：" + (Number.isNaN(cooldown) ? "43200s" : cooldown + "s") +
+        "；免打扰：" + quietText +
+        "；时区：" + timezone;
+
+      els.proactiveEnabled.checked = enabled;
+      els.quietHoursEnabled.checked = quietEnabled;
+      if (state && state.timezone) els.proactiveTimezone.value = state.timezone;
+      if (!Number.isNaN(cooldown)) els.proactiveCooldownSec.value = String(cooldown);
+      if (state && typeof state.quiet_start_minute === "number") els.quietStartMinute.value = String(state.quiet_start_minute);
+      if (state && typeof state.quiet_end_minute === "number") els.quietEndMinute.value = String(state.quiet_end_minute);
+
+      const lines = [];
+      lines.push("Source: " + (sourceLabel || "proactive_state"));
+      lines.push("enabled: " + enabled);
+      lines.push("quiet_hours_enabled: " + quietEnabled);
+      lines.push("quiet_window: " + quietText);
+      lines.push("timezone: " + timezone);
+      lines.push("cooldown_seconds: " + (Number.isNaN(cooldown) ? 0 : cooldown));
+      lines.push("last_proactive_at: " + fmtDateTime(lastAt));
+      lines.push("last_proactive_reason: " + valueOrFallback(lastReason));
+      lines.push("last_proactive_task_type: " + valueOrFallback(lastTaskType));
+      lines.push("last_proactive_content: " + valueOrFallback(lastContent));
+
+      if (!latestProactiveDebug) {
+        els.proactivePanel.open = true;
+        els.proactiveView.textContent = lines.join("\n");
+      }
+      updateCompanionSnapshot();
+    }
+
+    function renderProactiveDebug(result) {
+      latestProactiveDebug = result && typeof result === "object" ? result : null;
+      const state = result && result.state ? result.state : {};
+      const tasks = Array.isArray(result && result.tasks) ? result.tasks : [];
+      const outbound = Array.isArray(result && result.outbound_queue) ? result.outbound_queue : [];
+      const decisions = Array.isArray(result && result.task_decisions) ? result.task_decisions : [];
+
+      renderProactiveState(state, "proactive_debug");
+
+      const taskCounts = countByStatus(tasks);
+      const outboundCounts = countByStatus(outbound);
+      els.proactiveTaskPreview.textContent =
+        "tasks：" + summarizeStatusCounts(taskCounts) +
+        "；outbound：" + summarizeStatusCounts(outboundCounts) +
+        "；最近任务数：" + tasks.length;
+
+      if (decisions.length) {
+        const snippets = decisions.slice(0, 3).map((item) => {
+          const decision = item && item.decision ? item.decision : {};
+          return "#" + (item.task_id ?? 0) + " " + valueOrFallback(item.task_type, "unknown") +
+            " -> " + valueOrFallback(decision.action, "unknown") +
+            "（" + valueOrFallback(decision.summary, "no summary") + "）";
+        });
+        els.proactiveDecisionPreview.textContent = "最近决策：" + snippets.join("；");
+      } else {
+        els.proactiveDecisionPreview.textContent = "这里会显示 send / defer / cancel 的最近决策摘要。";
+      }
+
+      const lines = [];
+      lines.push("=== Proactive State ===");
+      lines.push(JSON.stringify(state || {}, null, 2));
+      lines.push("");
+      lines.push("=== Task Decisions ===");
+      if (!decisions.length) {
+        lines.push("(none)");
+      }
+      for (const item of decisions) {
+        const decision = item && item.decision ? item.decision : {};
+        lines.push("- task#" + (item.task_id ?? 0) +
+          " [" + valueOrFallback(item.task_type, "unknown") + "]" +
+          " status=" + valueOrFallback(item.status, "unknown") +
+          " => " + valueOrFallback(decision.action, "unknown") +
+          " | " + valueOrFallback(decision.summary, "(none)"));
+        lines.push("  candidate_content: " + valueOrFallback(decision.candidate_content));
+        lines.push("  recent_window_seconds: " + valueOrFallback(decision.recent_window_seconds, "0"));
+        lines.push("  similarity_score: " + valueOrFallback(fmtNum(decision.similarity_score), "0"));
+        if (Array.isArray(decision.checks) && decision.checks.length) {
+          for (const check of decision.checks) {
+            lines.push("  - [" + (check.passed ? "PASS" : "FAIL") + "] " + valueOrFallback(check.name, "check") + " | " + valueOrFallback(check.detail));
+          }
+        }
+      }
+      lines.push("");
+      lines.push("=== Proactive Tasks ===");
+      if (!tasks.length) {
+        lines.push("(none)");
+      }
+      for (const item of tasks) {
+        lines.push("- #" + (item.id ?? 0) +
+          " " + valueOrFallback(item.task_type, "unknown") +
+          " status=" + valueOrFallback(item.status, "unknown") +
+          " run_at=" + fmtDateTime(item.run_at) +
+          " next_attempt_at=" + fmtDateTime(item.next_attempt_at) +
+          " reason=" + valueOrFallback(item.reason));
+      }
+      lines.push("");
+      lines.push("=== Outbound Queue ===");
+      if (!outbound.length) {
+        lines.push("(none)");
+      }
+      for (const item of outbound) {
+        lines.push("- #" + (item.id ?? 0) +
+          " task_id=" + (item.task_id ?? 0) +
+          " status=" + valueOrFallback(item.status, "unknown") +
+          " attempts=" + (item.attempts ?? 0) + "/" + (item.max_attempts ?? 0) +
+          " delivered_at=" + fmtDateTime(item.delivered_at) +
+          " reason=" + valueOrFallback(item.reason));
+      }
+      lines.push("");
+      lines.push("=== Raw JSON ===");
+      lines.push(JSON.stringify(result, null, 2));
+
+      els.proactivePanel.open = true;
+      els.proactiveView.textContent = lines.join("\n");
+    }
+
     function renderDebugResult(result) {
       renderConversationPlan(result ? result.conversation_plan : null);
 
@@ -1689,6 +2159,10 @@
       const memoryErr = result && result.memory_context_err ? String(result.memory_context_err) : "";
       const rankTrace = Array.isArray(memoryContext.rank_trace) ? memoryContext.rank_trace : [];
       const touchedIDs = Array.isArray(memoryContext.memory_ids) ? memoryContext.memory_ids : [];
+      const mergedPersona = result && result.persona_after_merge ? result.persona_after_merge : {};
+      const relationshipSnapshot = buildRelationshipSnapshotFromDebug(result || {});
+
+      renderRelationshipRuntime(relationshipSnapshot, relationshipSnapshot.summary, "chat/debug");
 
       function pushTextBlock(title, content) {
         lines.push(title);
@@ -1714,7 +2188,26 @@
       pushTextBlock("[User Boundaries]", memoryContext.user_boundaries);
       pushTextBlock("[Important Events]", memoryContext.important_events);
       pushTextBlock("[Relevant Memories]", memoryContext.relevant_memories);
+      pushTextBlock("[Relationship Summary]", memoryContext.relationship_summary);
       lines.push("Touched Memory IDs: " + (touchedIDs.length ? touchedIDs.join(", ") : "(none)"));
+      lines.push("");
+
+      lines.push("=== Relationship Runtime ===");
+      lines.push("memory_context.relationship_state:");
+      lines.push(JSON.stringify(memoryContext.relationship_state || {}, null, 2));
+      lines.push("");
+      lines.push("persona_after_merge:");
+      lines.push(JSON.stringify({
+        relationship_stage: mergedPersona.relationship_stage,
+        relationship_intimacy: mergedPersona.relationship_intimacy,
+        relationship_trust: mergedPersona.relationship_trust,
+        relationship_playfulness: mergedPersona.relationship_playfulness,
+        relationship_heat: mergedPersona.relationship_heat,
+        relationship_summary: mergedPersona.relationship_summary
+      }, null, 2));
+      lines.push("");
+      lines.push("conversation_plan.relationship:");
+      lines.push(JSON.stringify((result && result.conversation_plan && result.conversation_plan.relationship) || {}, null, 2));
       lines.push("");
 
       lines.push("=== Memory Rank Trace ===");
@@ -1915,12 +2408,105 @@
         }
 
         renderDebugResult(data);
+        if (els.autoRuntimeRefresh.checked) {
+          await refreshRuntimePanels(true);
+        }
         setStatus("观察室已更新");
       } catch (err) {
         setStatus("Debug 失败: " + err.message, true);
       } finally {
         setBusy(false);
       }
+    }
+
+    function buildProactiveStatePayload() {
+      return {
+        user_id: els.userId.value.trim(),
+        enabled: !!els.proactiveEnabled.checked,
+        quiet_hours_enabled: !!els.quietHoursEnabled.checked,
+        quiet_start_minute: Math.max(0, Math.min(1439, Number(els.quietStartMinute.value) || 0)),
+        quiet_end_minute: Math.max(0, Math.min(1439, Number(els.quietEndMinute.value) || 0)),
+        timezone: els.proactiveTimezone.value.trim() || "Asia/Shanghai",
+        cooldown_seconds: Math.max(0, Number(els.proactiveCooldownSec.value) || 0)
+      };
+    }
+
+    async function loadProactiveState(silent = false) {
+      const userID = els.userId.value.trim();
+      if (!userID) return;
+
+      try {
+        const url = new URL(resolveProactiveStateUrl(), window.location.href);
+        url.searchParams.set("user_id", userID);
+        const response = await fetch(url.toString(), { method: "GET" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || ("HTTP " + response.status));
+        }
+        renderProactiveState(data.state || {}, "proactive/state");
+        if (!silent) {
+          setStatus("已读取 proactive_state");
+        }
+      } catch (err) {
+        if (!silent) {
+          setStatus("读取 proactive_state 失败: " + err.message, true);
+        }
+      }
+    }
+
+    async function saveProactiveState() {
+      const userID = els.userId.value.trim();
+      if (!userID) {
+        setStatus("请先填写 user_id 再保存 proactive_state", true);
+        return;
+      }
+
+      try {
+        setStatus("正在保存 proactive_state…");
+        const response = await fetch(resolveProactiveStateUrl(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildProactiveStatePayload())
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || ("HTTP " + response.status));
+        }
+        renderProactiveState(data.state || {}, "proactive/state(update)");
+        setStatus("已保存 proactive_state");
+      } catch (err) {
+        setStatus("保存 proactive_state 失败: " + err.message, true);
+      }
+    }
+
+    async function loadProactiveDebug(silent = false) {
+      const userID = els.userId.value.trim();
+      if (!userID) return;
+
+      try {
+        const url = new URL(resolveProactiveDebugUrl(), window.location.href);
+        url.searchParams.set("user_id", userID);
+        url.searchParams.set("session_id", els.sessionId.value.trim() || "default");
+        url.searchParams.set("limit", "20");
+        const response = await fetch(url.toString(), { method: "GET" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || ("HTTP " + response.status));
+        }
+        renderProactiveDebug(data);
+        if (!silent) {
+          setStatus("已刷新 proactive runtime");
+        }
+      } catch (err) {
+        if (!silent) {
+          setStatus("刷新 proactive runtime 失败: " + err.message, true);
+        }
+      }
+    }
+
+    async function refreshRuntimePanels(silent = false) {
+      await loadProactiveState(true);
+      await loadProactiveDebug(silent);
     }
 
     function getPollIntervalMs() {
@@ -1963,7 +2549,9 @@
         const items = Array.isArray(data.items) ? data.items : [];
         for (const item of items) {
           const text = String(item.content || "").trim();
-          if (text) addBubble("assistant", text, "（主动）");
+          const kind = detectProactiveKind(item.payload);
+          const suffix = kind ? "（主动·" + kind + "）" : "（主动）";
+          if (text) addBubble("assistant", text, suffix);
           const id = Number(item.id || 0);
           if (!Number.isNaN(id) && id > outboxAfterId) {
             outboxAfterId = id;
@@ -2036,7 +2624,9 @@
         try {
           const item = JSON.parse(event.data || "{}");
           const text = String(item.content || "").trim();
-          if (text) addBubble("assistant", text, "（主动）");
+          const kind = detectProactiveKind(item.payload);
+          const suffix = kind ? "（主动·" + kind + "）" : "（主动）";
+          if (text) addBubble("assistant", text, suffix);
           const id = Number(item.id || 0);
           if (!Number.isNaN(id) && id > outboxAfterId) {
             outboxAfterId = id;
@@ -2087,6 +2677,7 @@
     function restartOutboxRealtime() {
       ensureOutboxCursor();
       startOutboxRealtime();
+      refreshRuntimePanels(true);
     }
 
     function applyScenario(kind) {
@@ -2124,10 +2715,22 @@
     function clearAll() {
       els.messages.innerHTML = "";
       els.debugView.textContent = DEBUG_PLACEHOLDER;
+      els.relationshipView.textContent = RELATIONSHIP_PLACEHOLDER;
+      els.proactiveView.textContent = PROACTIVE_PLACEHOLDER;
       els.planView.textContent = PLAN_PLACEHOLDER;
       els.planPanel.open = false;
       els.debugPanel.open = false;
+      els.relationshipPanel.open = false;
+      els.proactivePanel.open = false;
+      latestRelationshipRuntime = null;
+      latestProactiveState = null;
+      latestProactiveDebug = null;
       updateEmptyState();
+      updateCompanionSnapshot();
+      els.relationshipSummaryPreview.textContent = "这里会显示服务端 relationship_state 的摘要。关闭“发送 relationship_stage”后，可以直接测试存储态阶段接管效果。";
+      els.proactiveStatePreview.textContent = "这里会显示主动消息是否开启、冷却时间和免打扰窗口。";
+      els.proactiveTaskPreview.textContent = "这里会显示最近 proactive tasks / outbound queue 的状态概览。";
+      els.proactiveDecisionPreview.textContent = "这里会显示 send / defer / cancel 的最近决策摘要。";
       setStatus("");
     }
 
@@ -2138,6 +2741,7 @@
         els.userId,
         els.sessionId,
         els.stage,
+        els.sendRelationshipStage,
         els.emotion,
         els.intensity,
         els.prefs,
@@ -2147,7 +2751,13 @@
         els.recentConv,
         els.autoDebug,
         els.autoPull,
-        els.preferSSE
+        els.preferSSE,
+        els.proactiveEnabled,
+        els.quietHoursEnabled,
+        els.proactiveCooldownSec,
+        els.quietStartMinute,
+        els.quietEndMinute,
+        els.proactiveTimezone
       ];
 
       for (const field of fields) {
@@ -2173,7 +2783,11 @@
     els.sendBtn.addEventListener("click", sendChat);
     els.debugBtn.addEventListener("click", () => debugPrompt());
     els.pullBtn.addEventListener("click", () => pullOutboxOnce(false));
+    els.runtimeBtn.addEventListener("click", () => refreshRuntimePanels(false));
     els.clearBtn.addEventListener("click", clearAll);
+    els.loadProactiveStateBtn.addEventListener("click", () => loadProactiveState(false));
+    els.saveProactiveStateBtn.addEventListener("click", saveProactiveState);
+    els.refreshProactiveDebugBtn.addEventListener("click", () => loadProactiveDebug(false));
     els.scenarioMemory.addEventListener("click", () => applyScenario("memory"));
     els.scenarioBoundary.addEventListener("click", () => applyScenario("boundary"));
     els.scenarioSafety.addEventListener("click", () => applyScenario("safety"));
@@ -2194,6 +2808,7 @@
     clearAll();
     updateCompanionSnapshot();
     startOutboxRealtime();
+    refreshRuntimePanels(true);
   </script>
 </body>
 </html>

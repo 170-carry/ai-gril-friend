@@ -94,3 +94,48 @@ func TestBuildOutboundMessage(t *testing.T) {
 		t.Fatalf("unexpected task_id: %v", got)
 	}
 }
+
+func TestBuildOutboundMessage_TopicReengage(t *testing.T) {
+	item := repo.OutboundQueueItem{
+		ID:       12,
+		TaskID:   23,
+		Reason:   "未完话题适合稍后自然回钩",
+		DedupKey: "topic_reengage_xxx",
+		Payload: map[string]any{
+			"task_type":     "topic_reengage",
+			"topic_label":   "面试准备",
+			"callback_hint": "你还说系统设计那块最让你发虚",
+		},
+	}
+
+	text, payload := BuildOutboundMessage(item)
+	if !strings.Contains(text, "面试准备") {
+		t.Fatalf("expected outbound content contains topic label, got %s", text)
+	}
+	if got := payload["kind"]; got != "topic_reengage" {
+		t.Fatalf("unexpected kind: %v", got)
+	}
+}
+
+func TestBuildOutboundMessage_TopicReengageWithSecondary(t *testing.T) {
+	item := repo.OutboundQueueItem{
+		ID:       13,
+		TaskID:   24,
+		Reason:   "未完话题适合稍后自然回钩",
+		DedupKey: "topic_reengage_with_secondary",
+		Payload: map[string]any{
+			"task_type":               "topic_reengage",
+			"topic_label":             "工作冲突",
+			"secondary_topic_label":   "睡眠状态",
+			"secondary_relation_type": "cause_effect",
+		},
+	}
+
+	text, payload := BuildOutboundMessage(item)
+	if !strings.Contains(text, "工作冲突") || !strings.Contains(text, "睡眠状态") {
+		t.Fatalf("expected outbound content contains primary and secondary topics, got %s", text)
+	}
+	if got := payload["secondary_topic_label"]; got != "睡眠状态" {
+		t.Fatalf("unexpected secondary topic label: %v", got)
+	}
+}

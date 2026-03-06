@@ -10,8 +10,10 @@ import (
 
 	"ai-gf/internal/config"
 	"ai-gf/internal/embedding"
+	"ai-gf/internal/llm"
 	"ai-gf/internal/memory"
 	"ai-gf/internal/repo"
+	"ai-gf/internal/signals"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
@@ -66,6 +68,8 @@ func main() {
 	memoryRepo := repo.NewPGMemoryRepository(pool)
 	embedder := buildEmbedder(cfg)
 	memoryService := memory.NewService(memoryRepo, embedder, nil, memory.DefaultConfig())
+	provider := llm.NewOpenAIProvider(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.EmbeddingModel)
+	memoryService.UseSignalAnalyzer(signals.NewLLMAnalyzer(provider))
 
 	if *doExtract {
 		if err := backfillFromChatHistory(ctx, pool, memoryService, *limit); err != nil {

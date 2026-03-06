@@ -65,13 +65,61 @@ type ContextRequest struct {
 
 // ContextResult 是注入 PromptBuilder 的记忆上下文结果。
 type ContextResult struct {
-	UserProfile      string              `json:"user_profile"`
-	UserPreferences  string              `json:"user_preferences"`
-	UserBoundaries   string              `json:"user_boundaries"`
-	ImportantEvents  string              `json:"important_events"`
-	RelevantMemories string              `json:"relevant_memories"`
-	MemoryIDs        []int64             `json:"memory_ids"`
-	RankTrace        []ranking.TraceItem `json:"rank_trace"`
+	UserProfile         string               `json:"user_profile"`
+	UserPreferences     string               `json:"user_preferences"`
+	UserBoundaries      string               `json:"user_boundaries"`
+	ImportantEvents     string               `json:"important_events"`
+	TopicContext        string               `json:"topic_context"`
+	RelevantMemories    string               `json:"relevant_memories"`
+	RelationshipSummary string               `json:"relationship_summary"`
+	RelationshipState   RelationshipSnapshot `json:"relationship_state"`
+	ActiveTopics        []TopicSnapshot      `json:"active_topics"`
+	TopicGraph          []TopicEdgeSnapshot  `json:"topic_graph"`
+	MemoryIDs           []int64              `json:"memory_ids"`
+	RankTrace           []ranking.TraceItem  `json:"rank_trace"`
+}
+
+// RelationshipSnapshot 是给 ChatService / PromptBuilder 使用的关系状态快照。
+type RelationshipSnapshot struct {
+	Stage             string     `json:"stage"`
+	Familiarity       float64    `json:"familiarity"`
+	Intimacy          float64    `json:"intimacy"`
+	Trust             float64    `json:"trust"`
+	Flirt             float64    `json:"flirt"`
+	BoundaryRisk      float64    `json:"boundary_risk"`
+	SupportNeed       float64    `json:"support_need"`
+	Playfulness       float64    `json:"playfulness"`
+	InteractionHeat   float64    `json:"interaction_heat"`
+	TotalTurns        int        `json:"total_turns"`
+	LastInteractionAt *time.Time `json:"last_interaction_at,omitempty"`
+	Summary           string     `json:"summary"`
+}
+
+// TopicSnapshot 是当前对话前可见的话题线程摘要。
+type TopicSnapshot struct {
+	TopicKey         string     `json:"topic_key"`
+	Label            string     `json:"label"`
+	Summary          string     `json:"summary"`
+	CallbackHint     string     `json:"callback_hint,omitempty"`
+	ClusterKey       string     `json:"cluster_key,omitempty"`
+	AliasTerms       []string   `json:"alias_terms,omitempty"`
+	RelatedTopicKeys []string   `json:"related_topic_keys,omitempty"`
+	Status           string     `json:"status"`
+	Importance       int        `json:"importance"`
+	MentionCount     int        `json:"mention_count"`
+	RecallCount      int        `json:"recall_count"`
+	LastDiscussedAt  *time.Time `json:"last_discussed_at,omitempty"`
+	NextRecallAt     *time.Time `json:"next_recall_at,omitempty"`
+	LastRecalledAt   *time.Time `json:"last_recalled_at,omitempty"`
+}
+
+// TopicEdgeSnapshot 是话题图的轻量边摘要。
+type TopicEdgeSnapshot struct {
+	FromTopicKey  string  `json:"from_topic_key"`
+	ToTopicKey    string  `json:"to_topic_key"`
+	RelationType  string  `json:"relation_type"`
+	Weight        float64 `json:"weight"`
+	EvidenceCount int     `json:"evidence_count"`
 }
 
 // TurnInput 是一轮对话结束后的抽取输入。

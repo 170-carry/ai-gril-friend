@@ -22,6 +22,7 @@ type SchedulerRepository interface {
 type DispatcherRepository interface {
 	BackfillLegacyLifeEventTasks(ctx context.Context, limit int) (int, error)
 	ClaimDueTasks(ctx context.Context, now time.Time, limit int) ([]repo.ProactiveTask, error)
+	GetConversationTopic(ctx context.Context, userID, sessionID, topicKey string) (repo.ConversationTopic, error)
 	GetState(ctx context.Context, userID string) (repo.ProactiveState, error)
 	RescheduleTask(ctx context.Context, taskID int64, nextAttemptAt time.Time, lastError string) error
 	CancelTask(ctx context.Context, taskID int64, lastError string) error
@@ -228,6 +229,38 @@ func BuildOutboundMessage(item repo.OutboundQueueItem) (string, map[string]any) 
 	case "care_followup":
 		clientPayload["kind"] = "care_followup"
 		return "我来回访一下你刚才的状态，现在感觉怎么样了？如果你愿意，我还在这陪你。", clientPayload
+	case "topic_reengage":
+		label := strings.TrimSpace(toString(payload["topic_label"]))
+		if label == "" {
+			label = strings.TrimSpace(toString(payload["topic_key"]))
+		}
+		if label == "" {
+			label = "昨天那件事"
+		}
+		callbackHint := strings.TrimSpace(toString(payload["callback_hint"]))
+		secondaryLabel := strings.TrimSpace(toString(payload["secondary_topic_label"]))
+		secondaryRelation := normalizeOutboundTopicRelationType(toString(payload["secondary_relation_type"]))
+		clientPayload["kind"] = "topic_reengage"
+		clientPayload["topic_label"] = label
+		if secondaryLabel != "" {
+			clientPayload["secondary_topic_label"] = secondaryLabel
+			clientPayload["secondary_relation_type"] = secondaryRelation
+			switch secondaryRelation {
+			case "cause_effect":
+				return fmt.Sprintf("突然想起你昨天提到的「%s」，好像还牵着「%s」那条线。后来有新进展吗？", label, secondaryLabel), clientPayload
+			case "progression":
+				return fmt.Sprintf("昨天聊到的「%s」，后来有接着走到「%s」那一步吗？", label, secondaryLabel), clientPayload
+			case "context":
+				return fmt.Sprintf("突然想起你昨天提到的「%s」，连着「%s」那条线我也记着。后来怎么样了？", label, secondaryLabel), clientPayload
+			case "contrast":
+				return fmt.Sprintf("昨天那条「%s」和「%s」我都还记得。后来哪边变化更大？", label, secondaryLabel), clientPayload
+			}
+		}
+		if callbackHint != "" {
+			clientPayload["callback_hint"] = callbackHint
+			return fmt.Sprintf("突然想起你昨天提到的「%s」，%s。后来有新进展吗？", label, callbackHint), clientPayload
+		}
+		return fmt.Sprintf("昨天没讲完的「%s」，我又想起来了。后来推进得怎么样啦？", label), clientPayload
 	default:
 		title := strings.TrimSpace(toString(payload["event_title"]))
 		if title == "" {
@@ -335,6 +368,21 @@ func clonePayload(in map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func normalizeOutboundTopicRelationType(relationType string) string {
+	switch strings.TrimSpace(relationType) {
+	case "cause_effect":
+		return "cause_effect"
+	case "progression":
+		return "progression"
+	case "contrast":
+		return "contrast"
+	case "context":
+		return "context"
+	default:
+		return "co_occurs"
+	}
 }
 
 // toString 把任意 JSON 值安全转成字符串。

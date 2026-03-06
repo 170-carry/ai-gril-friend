@@ -27,6 +27,7 @@ func NewBuilder() *PromptBuilder {
 			newProfileModule(),
 			newPreferencesModule(),
 			newEventsModule(),
+			newTopicsModule(),
 			newRAGModule(),
 			newEmotionModule(),
 			newConversationPlanModule(),

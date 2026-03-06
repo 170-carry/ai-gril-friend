@@ -273,6 +273,8 @@ func fitSoftBlock(block PromptBlock, remain int) (PromptBlock, bool, string) {
 		return fitEmotionBlock(block, remain)
 	case BucketSummary:
 		return fitSummaryBlock(block, remain)
+	case BucketSTM:
+		return fitSTMBlock(block, remain)
 	default:
 		if canTrimAsPlainText(block) {
 			return fitPlainTextBlock(block, remain)
@@ -505,6 +507,49 @@ func fitSummaryBlock(block PromptBlock, remain int) (PromptBlock, bool, string) 
 	return PromptBlock{}, false, "summary drop(after degrade)"
 }
 
+// fitSTMBlock 允许最近历史在 hard-cap 阶段做句级压缩，而不是直接整条丢掉。
+// 这样既能保住最近上下文锚点，也能给摘要块留出空间。
+func fitSTMBlock(block PromptBlock, remain int) (PromptBlock, bool, string) {
+	if remain <= 0 {
+		return PromptBlock{}, false, "stm budget exhausted"
+	}
+	if block.TokensEst <= remain {
+		return block, true, "budget keep"
+	}
+
+	trimmed := trimTextToSentenceTokens(block.Content, remain)
+	if strings.TrimSpace(trimmed) == "" {
+		return fitSTMBlockWithFallback(block, remain, "stm trim failed")
+	}
+
+	nb := block
+	nb.Content = trimmed
+	nb.TokensEst = estimateTextTokens(trimmed)
+	if nb.TokensEst > remain {
+		return fitSTMBlockWithFallback(block, remain, "stm trim overflow")
+	}
+	return nb, true, "stm degrade(sentence_trim)"
+}
+
+// fitSTMBlockWithFallback 在句级裁剪不够精确时，继续用 token 级裁剪保住最小上下文锚点。
+func fitSTMBlockWithFallback(block PromptBlock, remain int, failure string) (PromptBlock, bool, string) {
+	for budget := remain; budget >= 1; budget-- {
+		trimmed := trimTextToTokens(block.Content, budget)
+		if strings.TrimSpace(trimmed) == "" {
+			continue
+		}
+		if estimateTextTokens(trimmed) > remain {
+			continue
+		}
+
+		nb := block
+		nb.Content = trimmed
+		nb.TokensEst = estimateTextTokens(trimmed)
+		return nb, true, "stm degrade(token_trim)"
+	}
+	return PromptBlock{}, false, failure
+}
+
 // canTrimAsPlainText 仅允许通用说明类 block 走文本截断。
 func canTrimAsPlainText(block PromptBlock) bool {
 	if !block.Redactable {
@@ -601,6 +646,9 @@ func hardCapPrompt(blocks []PromptBlock, cap int, trace *BuildTrace) []PromptBlo
 		if target < 0 {
 			target = 0
 		}
+		if block.Bucket == BucketSTM && idx == latestSTMIndex(out) && target < 4 {
+			target = 4
+		}
 
 		fitted, ok, reason := fitSoftBlock(block, target)
 		if ok && fitted.TokensEst < block.TokensEst {
@@ -642,6 +690,23 @@ func findOverflowCandidate(blocks []PromptBlock) int {
 	return idx
 }
 
+// latestSTMIndex 返回当前保留下来的最新一条历史消息位置。
+func latestSTMIndex(blocks []PromptBlock) int {
+	idx := -1
+	maxSeq := -1
+	for i, block := range blocks {
+		if block.Bucket != BucketSTM {
+			continue
+		}
+		seq := getSeq(block)
+		if seq >= maxSeq {
+			maxSeq = seq
+			idx = i
+		}
+	}
+	return idx
+}
+
 // overflowScore 计算候选优先淘汰分数，分数越高越先处理。
 func overflowScore(block PromptBlock) int {
 	score := block.Priority
@@ -653,7 +718,8 @@ func overflowScore(block PromptBlock) int {
 	case BucketProfile:
 		score += 3000
 	case BucketSummary:
-		score += 2500
+		// 历史摘要比单条 STM 更浓缩，最终 hard-cap 时应尽量后删。
+		score += 900
 	case BucketSTM:
 		ageWeight := 1000 - minInt(getSeq(block), 1000)
 		score += 1500 + ageWeight

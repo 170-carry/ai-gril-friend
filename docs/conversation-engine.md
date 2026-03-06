@@ -290,13 +290,13 @@ Memory Hooks（事件/偏好/雷区）
 
 relationship_state（后加）
 
-上线后再加：
+上线后继续细化：
 
-多样化话题维持（topic engine）
+- 多样化话题维持（topic engine，已于 2026-03-06 落地第一版）
 
-更细粒度的 relationship_state 策略学习
+- 更细粒度的 relationship_state 策略学习
 
-说明：主动聊天触发器（proactive）已在当前代码中落地，具体见第 14 节。
+说明：主动聊天触发器（proactive）与 topic engine 已在当前代码中落地，具体见第 14 节。
 
 14. 当前实现清单（2026-03-06）
 
@@ -307,6 +307,7 @@ relationship_state（后加）
 - [x] Intent Router：规则路由 + 置信度输出
 - [x] State Manager：OPEN / EXPLORE / SUPPORT / SOLVE / COMMIT / CLOSE
 - [x] Style Controller：warmth / playfulness / directness / length / emoji_level
+- [x] Relationship State：连续关系状态（stage / intimacy / trust / playfulness_threshold / interaction_heat）
 - [x] Turn Planner：mirror / ask / add_value / close_softly
 - [x] 每轮最多 1 个追问
 - [x] stop_rules：用户拒绝后停止追问
@@ -319,6 +320,7 @@ relationship_state（后加）
 - [x] CE 输出 `CONVERSATION_PLAN` block，注入 Prompt Builder
 - [x] `/chat/debug` 返回结构化 `conversation_plan`
 - [x] Prompt Builder 会把最近对话、记忆、情绪和 CE 规划一起组装给 LLM
+- [x] Prompt Builder 注入 `RELATIONSHIP_STATE` block，包含阶段与连续分数
 
 14.3 Actions 执行链路
 
@@ -335,12 +337,68 @@ relationship_state（后加）
 - `SAVE_EVENT` -> `life_events`
 - `SAVE_SEMANTIC_MEMORY` -> `memory_chunks`
 
-14.4 主动消息运行时（Proactive Runtime）
+14.4 Relationship State Runtime
+
+关系状态现在不是只存在于 Prompt 文案里的概念，而是已经有独立存储、自动更新、对话前注入的运行时能力。
+
+- [x] 新增 `relationship_state` 表
+- [x] 存储连续状态：`stage / intimacy_score / trust_score / playfulness_threshold / interaction_heat`
+- [x] 记录最近互动时间与累计轮次：`last_interaction_at / total_turns`
+- [x] 每轮对话结束后由现有 memory async worker 自动更新
+- [x] 对话前由 memory context 读出并注入 PromptBuilder / CE
+- [x] `relationship_stage` 不再只是前端手填；默认优先使用存储态关系阶段
+
+当前更新信号至少包括：
+
+- [x] 亲密表达（想你 / 抱抱 / 早安晚安）
+- [x] 脆弱表达（焦虑 / 难受 / 委屈 / 紧张）
+- [x] 陪伴请求（陪我 / 听我说 / 你在吗）
+- [x] 玩笑信号（哈哈 / 开玩笑 / 逗你）
+- [x] 边界/降温信号（别这样 / 别闹 / 不想聊）
+- [x] 最近互动新鲜度（时间间隔影响 interaction_heat）
+
+14.5 Topic Engine（话题维持与主动召回）
+
+这次补的是 CE 里最像“活人”的一层：不仅回答当前句，还要知道“昨天那件事有没有讲完”，以及“现在适不适合轻轻提一下”。
+
+- [x] 新增 `conversation_topics` 表，独立维护话题线程
+- [x] 新增 `conversation_topic_edges` 表，维护 topic graph
+- [x] 每轮对话后通过 `TRACK_TOPIC` 动作更新话题状态
+- [x] 并行线程会通过 `LINK_TOPICS` 动作更新 topic graph
+- [x] `memory.BuildContext` 返回 `topic_context` 与 `active_topics`
+- [x] `memory.BuildContext` 返回 `topic_graph`
+- [x] Prompt Builder 注入 `[Active Topics]` block
+- [x] CE 输出 `conversation_plan.topic`
+- [x] 话题策略支持：
+  - `open_new`：新开一个值得延续的话题
+  - `continue_existing`：用户正在接着昨天/上一轮继续
+  - `gentle_recall`：用户只是轻触式开场，但存在适合自然回钩的未完话题
+  - `none`：不强行绑定旧话题
+- [x] 长叙事消息会拆成多个 `topic seed`
+- [x] 超长叙事优先接入 LLM topic summarizer，失败回退到 clause 规则
+- [x] 主线程之外会输出 `related topics`
+- [x] `cluster_key + alias_terms + callback` 用于旧梗 / thread clustering
+- [x] `LINK_TOPICS` 不再只写 `co_occurs`，支持 `cause_effect / progression / contrast / context`
+- [x] 新增 `SCHEDULE_TOPIC_REENGAGE` -> `proactive_tasks(task_type=topic_reengage)`
+- [x] 主动送达后回写 `conversation_topics.last_recalled_at / recall_count`
+
+当前第一版启发式至少覆盖：
+
+- [x] “那个/这件事/后来/进展/还没/继续”等续话信号
+- [x] “在吗/想你/哈哈/下班了/晚安”等轻触式开场
+- [x] “搞定了/解决了/没事了/我去做了”等收束信号
+- [x] 面试/考试/工作冲突/工作压力/感情关系/家庭关系/睡眠状态/职业选择等更细话题 label 归纳
+- [x] callback / alias 相似度匹配旧梗
+- [x] topic graph 关联线程回带
+- [x] 主动回钩在强关系边上可附带 1 条 secondary topic，但不会整串抛出并行线程
+
+14.6 主动消息运行时（Proactive Runtime）
 
 这里是本轮补完的重点。现在系统已经不是“记下以后要主动”，而是具备真正可运行的主动消息链路。
 
 - [x] `SCHEDULE_EVENT_REMINDER` -> `proactive_tasks(task_type=event_reminder)`
 - [x] `SCHEDULE_CARE_FOLLOWUP` -> `proactive_tasks(task_type=care_followup)`
+- [x] `SCHEDULE_TOPIC_REENGAGE` -> `proactive_tasks(task_type=topic_reengage)`
 - [x] `proactive_tasks` 到期后进入 `outbound_queue`
 - [x] `outbound_queue` 投递成功后写入 `chat_messages` 和 `chat_outbox`
 - [x] 前端可以通过 `/chat/outbox/pull` 或 `/chat/outbox/stream` 接收主动消息
@@ -348,6 +406,7 @@ relationship_state（后加）
 主动运行时当前已支持：
 
 - [x] 独立任务表，不再把系统提醒/回访混入 `life_events`
+- [x] 发送前决策器：不是到点就发，而是先做 `send / defer / cancel` 判定
 - [x] `reason` 字段，记录“为什么要主动”
 - [x] `dedup_key` 去重
 - [x] `status` 状态流转
@@ -362,7 +421,16 @@ relationship_state（后加）
 - 系统提醒、回访、主动关心任务不再写入 `life_events`
 - Prompt 中的 UPCOMING_EVENTS 已过滤旧版遗留的“提醒：*”和“情绪回访”污染数据
 
-14.5 调试与观测接口
+当前发送前决策器至少会判断：
+
+- [x] 用户是否开启主动消息
+- [x] 当前是否命中免打扰时间
+- [x] 最近主动时间是否仍在频率窗口内
+- [x] 这次主动是否有明确 reason
+- [x] 本次候选文案是否和最近一次同类型主动文案过于相似
+- [x] 对于 `topic_reengage`，还会判断话题是否已结束、是否已被重新聊过、是否还没到回钩时间
+
+14.7 调试与观测接口
 
 - [x] `POST /chat/debug`：查看 Prompt Builder 和 `conversation_plan`
 - [x] `GET /chat/proactive/state`：查看用户主动消息状态
@@ -370,25 +438,31 @@ relationship_state（后加）
 - [x] `GET /chat/proactive/debug`：查看任务、队列和状态
 - [x] `GET /chat/outbox/pull`：短轮询拉取主动消息
 - [x] `GET /chat/outbox/stream`：SSE 实时接收主动消息
+- [x] `/chat/debug` 中的 `memory_context.relationship_state` / `persona_after_merge` 可查看最终关系状态注入结果
+- [x] `/chat/debug` 中的 `memory_context.topic_context` / `memory_context.active_topics` / `memory_context.topic_graph` / `conversation_plan.topic` 可查看话题层结果
 
-14.6 已完成的行为修正
+14.8 已完成的行为修正
 
 - [x] 修复“有点焦虑”因为包含“点”而被误判为时间事件的问题
 - [x] 修复 proactive hooks 只落库、不真正触发主动消息的问题
 - [x] 修复系统提醒/回访污染长期事件记忆的问题
+- [x] 修复主动任务“到点直接发”，缺少发送前决策的问题
+- [x] 修复 `relationship_state` 只存在于概念层、没有持续状态与自动更新的问题
+- [x] 修复系统只能被动回答当前句，无法延续未完话题和主动回钩的问题
 
-14.7 当前验证结果
+14.9 当前验证结果
 
 - [x] `go test ./...` 通过
 - [x] 真实运行时验证通过：事件提醒任务可生成、可到期扫描、可进入 outbox、可投递到聊天窗口
 - [x] 用户关闭主动消息后，新任务会被取消，不再投递
 - [x] 命中免打扰窗口后，任务会顺延到允许时间
 - [x] 命中冷却时间后，任务会顺延到下一个可发送时间
+- [x] 话题未完时，第二天用户只发“在吗”，CE 可输出 `gentle_recall`
 
-14.8 仍未补完的部分
+14.9 仍未补完的部分
 
 以下能力仍然属于后续增强项，不在当前已落地清单内：
 
 - [ ] 多样化话题维持（topic engine）
-- [ ] 更细粒度 relationship_state 学习与长期演化
+- [ ] 更细粒度 relationship_state 学习与长期演化（如长期依恋风格、修复机制、双向承诺状态）
 - [ ] 更复杂的主动召回策略（如多天未聊、多条件组合触发）

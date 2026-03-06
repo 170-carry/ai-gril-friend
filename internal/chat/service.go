@@ -12,6 +12,7 @@ import (
 	"ai-gf/internal/memory"
 	"ai-gf/internal/prompt"
 	"ai-gf/internal/repo"
+	"ai-gf/internal/signals"
 )
 
 // Service 封装聊天主流程：历史加载、prompt 构建、LLM 调用与消息落库。
@@ -73,6 +74,7 @@ func NewService(
 	temperature float64,
 	maxHistoryRounds int,
 	promptBudget prompt.BudgetConfig,
+	conversationEmbedders ...signals.Embedder,
 ) *Service {
 	if maxHistoryRounds <= 0 {
 		maxHistoryRounds = 20
@@ -86,12 +88,26 @@ func NewService(
 		provider:         provider,
 		memoryEngine:     memoryEngine,
 		turnProcessor:    turnProcessor,
-		conversationCE:   conversation.NewEngine(),
+		conversationCE:   conversation.NewEngine(conversationEmbedders...),
 		promptBuilder:    builder,
 		promptBudget:     promptBudget,
 		temperature:      temperature,
 		maxHistoryRounds: maxHistoryRounds,
 	}
+}
+
+func (s *Service) UseSignalAnalyzer(analyzer signals.Analyzer) {
+	if s == nil || s.conversationCE == nil {
+		return
+	}
+	s.conversationCE.UseSignalAnalyzer(analyzer)
+}
+
+func (s *Service) UseTopicSummarizer(summarizer conversation.TopicSummarizer) {
+	if s == nil || s.conversationCE == nil {
+		return
+	}
+	s.conversationCE.UseTopicSummarizer(summarizer)
 }
 
 // StreamChat 执行完整聊天链路：读取历史、写入用户消息、流式生成、写入助手回复。
@@ -344,7 +360,22 @@ func (s *Service) mergePersonaWithMemory(
 	merged.UserPreferences = fillPersonaField(merged.UserPreferences, memoryCtx.UserPreferences)
 	merged.UserBoundaries = fillPersonaField(merged.UserBoundaries, memoryCtx.UserBoundaries)
 	merged.ImportantEvents = fillPersonaField(merged.ImportantEvents, memoryCtx.ImportantEvents)
+	merged.TopicContext = fillPersonaField(merged.TopicContext, memoryCtx.TopicContext)
 	merged.RelevantMemories = fillPersonaField(merged.RelevantMemories, memoryCtx.RelevantMemories)
+	merged.RelationshipSummary = fillPersonaField(merged.RelationshipSummary, memoryCtx.RelationshipSummary)
+	if !merged.RelationshipStageProvided && strings.TrimSpace(memoryCtx.RelationshipState.Stage) != "" {
+		merged.RelationshipStage = strings.TrimSpace(memoryCtx.RelationshipState.Stage)
+	}
+	if strings.TrimSpace(memoryCtx.RelationshipState.Stage) != "" {
+		merged.RelationshipFamiliarity = memoryCtx.RelationshipState.Familiarity
+		merged.RelationshipIntimacy = memoryCtx.RelationshipState.Intimacy
+		merged.RelationshipTrust = memoryCtx.RelationshipState.Trust
+		merged.RelationshipFlirt = memoryCtx.RelationshipState.Flirt
+		merged.RelationshipBoundaryRisk = memoryCtx.RelationshipState.BoundaryRisk
+		merged.RelationshipSupportNeed = memoryCtx.RelationshipState.SupportNeed
+		merged.RelationshipPlayfulness = memoryCtx.RelationshipState.Playfulness
+		merged.RelationshipHeat = memoryCtx.RelationshipState.InteractionHeat
+	}
 	return merged, memoryCtx, nil
 }
 
@@ -380,12 +411,27 @@ func (s *Service) buildConversationPlan(
 			UserPreferences:  coalesceNonPlaceholder(memoryCtx.UserPreferences, persona.UserPreferences),
 			UserBoundaries:   coalesceNonPlaceholder(memoryCtx.UserBoundaries, persona.UserBoundaries),
 			ImportantEvents:  coalesceNonPlaceholder(memoryCtx.ImportantEvents, persona.ImportantEvents),
+			TopicContext:     coalesceNonPlaceholder(memoryCtx.TopicContext, persona.TopicContext),
 			RelevantMemories: coalesceNonPlaceholder(memoryCtx.RelevantMemories, persona.RelevantMemories),
+			ActiveTopics:     toConversationTopics(memoryCtx.ActiveTopics),
+			TopicGraph:       toConversationTopicGraph(memoryCtx.TopicGraph),
 		},
 		Emotion:           persona.Emotion,
 		EmotionIntensity:  persona.EmotionIntensity,
 		RelationshipState: persona.RelationshipStage,
-		Now:               time.Now(),
+		RelationshipSnapshot: conversation.RelationshipSnapshot{
+			Stage:           persona.RelationshipStage,
+			Familiarity:     persona.RelationshipFamiliarity,
+			Intimacy:        persona.RelationshipIntimacy,
+			Trust:           persona.RelationshipTrust,
+			Flirt:           persona.RelationshipFlirt,
+			BoundaryRisk:    persona.RelationshipBoundaryRisk,
+			SupportNeed:     persona.RelationshipSupportNeed,
+			Playfulness:     persona.RelationshipPlayfulness,
+			InteractionHeat: persona.RelationshipHeat,
+			Summary:         persona.RelationshipSummary,
+		},
+		Now: time.Now(),
 	})
 	return plan, conversation.RenderPlanForPrompt(plan)
 }
@@ -421,6 +467,49 @@ func toMemoryActions(actions []conversation.Action) []memory.TurnAction {
 			Type:   actionType,
 			Params: params,
 			Reason: strings.TrimSpace(action.Reason),
+		})
+	}
+	return out
+}
+
+func toConversationTopics(items []memory.TopicSnapshot) []conversation.TopicSnapshot {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]conversation.TopicSnapshot, 0, len(items))
+	for _, item := range items {
+		out = append(out, conversation.TopicSnapshot{
+			TopicKey:         strings.TrimSpace(item.TopicKey),
+			Label:            strings.TrimSpace(item.Label),
+			Summary:          strings.TrimSpace(item.Summary),
+			CallbackHint:     strings.TrimSpace(item.CallbackHint),
+			ClusterKey:       strings.TrimSpace(item.ClusterKey),
+			AliasTerms:       append([]string(nil), item.AliasTerms...),
+			RelatedTopicKeys: append([]string(nil), item.RelatedTopicKeys...),
+			Status:           strings.TrimSpace(item.Status),
+			Importance:       item.Importance,
+			MentionCount:     item.MentionCount,
+			RecallCount:      item.RecallCount,
+			LastDiscussedAt:  item.LastDiscussedAt,
+			NextRecallAt:     item.NextRecallAt,
+			LastRecalledAt:   item.LastRecalledAt,
+		})
+	}
+	return out
+}
+
+func toConversationTopicGraph(items []memory.TopicEdgeSnapshot) []conversation.TopicEdgeSnapshot {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]conversation.TopicEdgeSnapshot, 0, len(items))
+	for _, item := range items {
+		out = append(out, conversation.TopicEdgeSnapshot{
+			FromTopicKey:  strings.TrimSpace(item.FromTopicKey),
+			ToTopicKey:    strings.TrimSpace(item.ToTopicKey),
+			RelationType:  strings.TrimSpace(item.RelationType),
+			Weight:        item.Weight,
+			EvidenceCount: item.EvidenceCount,
 		})
 	}
 	return out

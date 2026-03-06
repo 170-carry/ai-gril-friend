@@ -57,6 +57,31 @@ type LifeEvent struct {
 	UpdatedAt       time.Time
 }
 
+// RelationshipState 是用户与 AI 的关系连续状态。
+type RelationshipState struct {
+	UserID string
+	Stage  string
+	// FamiliarityScore 表示“彼此是否已经有稳定互动历史和共同上下文”。
+	FamiliarityScore float64
+	IntimacyScore    float64
+	TrustScore       float64
+	// FlirtScore 表示双向暧昧/恋爱化表达是否已经形成持续证据。
+	FlirtScore float64
+	// BoundaryRiskScore 越高，说明近期越需要明显收住节奏和表达权限。
+	BoundaryRiskScore float64
+	// SupportNeedScore 越高，说明当前更应优先陪伴和安慰，而不是关系升级。
+	SupportNeedScore       float64
+	PlayfulnessThreshold   float64
+	InteractionHeat        float64
+	TotalTurns             int
+	LastInteractionAt      *time.Time
+	LastUserMessageAt      *time.Time
+	LastAssistantMessageAt *time.Time
+	LastStageChangeAt      *time.Time
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+}
+
 // MemoryChunk 是语义记忆条目。
 type MemoryChunk struct {
 	ID           int64
@@ -82,6 +107,14 @@ type MemoryChunk struct {
 type MemoryRepository interface {
 	GetUserProfile(ctx context.Context, userID string) (UserProfile, error)
 	UpsertUserProfile(ctx context.Context, profile UserProfile) error
+	GetRelationshipState(ctx context.Context, userID string) (RelationshipState, error)
+	UpsertRelationshipState(ctx context.Context, state RelationshipState) error
+	ListConversationTopics(ctx context.Context, userID, sessionID string, limit int) ([]ConversationTopic, error)
+	ListConversationTopicEdges(ctx context.Context, userID, sessionID string, topicKeys []string, limit int) ([]ConversationTopicEdge, error)
+	GetConversationTopic(ctx context.Context, userID, sessionID, topicKey string) (ConversationTopic, error)
+	UpsertConversationTopic(ctx context.Context, topic ConversationTopic) (int64, error)
+	UpsertConversationTopicEdge(ctx context.Context, edge ConversationTopicEdge) error
+	MarkConversationTopicRecalled(ctx context.Context, userID, sessionID, topicKey string, recalledAt time.Time) error
 	ListUserPreferences(ctx context.Context, userID string, limit int) ([]UserPreference, error)
 	UpsertUserPreference(ctx context.Context, pref UserPreference) (int64, error)
 	DeleteUserPreferencesByKeyword(ctx context.Context, userID, keyword string) (int64, error)
@@ -106,6 +139,90 @@ type PGMemoryRepository struct {
 // NewPGMemoryRepository 创建 Postgres 记忆仓库。
 func NewPGMemoryRepository(pool *pgxpool.Pool) *PGMemoryRepository {
 	return &PGMemoryRepository{pool: pool}
+}
+
+// GetRelationshipState 读取关系状态；不存在时返回默认状态。
+func (r *PGMemoryRepository) GetRelationshipState(ctx context.Context, userID string) (RelationshipState, error) {
+	const query = `SELECT user_id, stage, familiarity_score, intimacy_score, trust_score,
+		flirt_score, boundary_risk_score, support_need_score, playfulness_threshold,
+		interaction_heat, total_turns, last_interaction_at, last_user_message_at,
+		last_assistant_message_at, last_stage_change_at, created_at, updated_at
+		FROM relationship_state
+		WHERE user_id = $1`
+
+	var out RelationshipState
+	if err := r.pool.QueryRow(ctx, query, userID).Scan(
+		&out.UserID,
+		&out.Stage,
+		&out.FamiliarityScore,
+		&out.IntimacyScore,
+		&out.TrustScore,
+		&out.FlirtScore,
+		&out.BoundaryRiskScore,
+		&out.SupportNeedScore,
+		&out.PlayfulnessThreshold,
+		&out.InteractionHeat,
+		&out.TotalTurns,
+		&out.LastInteractionAt,
+		&out.LastUserMessageAt,
+		&out.LastAssistantMessageAt,
+		&out.LastStageChangeAt,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	); err != nil {
+		if err == pgx.ErrNoRows {
+			return defaultRelationshipState(userID), nil
+		}
+		return RelationshipState{}, fmt.Errorf("get relationship_state: %w", err)
+	}
+	return out, nil
+}
+
+// UpsertRelationshipState 新增或更新关系状态。
+func (r *PGMemoryRepository) UpsertRelationshipState(ctx context.Context, state RelationshipState) error {
+	const query = `INSERT INTO relationship_state (
+			user_id, stage, familiarity_score, intimacy_score, trust_score,
+			flirt_score, boundary_risk_score, support_need_score, playfulness_threshold,
+			interaction_heat, total_turns, last_interaction_at, last_user_message_at,
+			last_assistant_message_at, last_stage_change_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		ON CONFLICT (user_id) DO UPDATE SET
+			stage = EXCLUDED.stage,
+			familiarity_score = EXCLUDED.familiarity_score,
+			intimacy_score = EXCLUDED.intimacy_score,
+			trust_score = EXCLUDED.trust_score,
+			flirt_score = EXCLUDED.flirt_score,
+			boundary_risk_score = EXCLUDED.boundary_risk_score,
+			support_need_score = EXCLUDED.support_need_score,
+			playfulness_threshold = EXCLUDED.playfulness_threshold,
+			interaction_heat = EXCLUDED.interaction_heat,
+			total_turns = EXCLUDED.total_turns,
+			last_interaction_at = COALESCE(EXCLUDED.last_interaction_at, relationship_state.last_interaction_at),
+			last_user_message_at = COALESCE(EXCLUDED.last_user_message_at, relationship_state.last_user_message_at),
+			last_assistant_message_at = COALESCE(EXCLUDED.last_assistant_message_at, relationship_state.last_assistant_message_at),
+			last_stage_change_at = COALESCE(EXCLUDED.last_stage_change_at, relationship_state.last_stage_change_at),
+			updated_at = NOW()`
+
+	if _, err := r.pool.Exec(ctx, query,
+		state.UserID,
+		strings.TrimSpace(state.Stage),
+		clampScore(state.FamiliarityScore),
+		clampScore(state.IntimacyScore),
+		clampScore(state.TrustScore),
+		clampScore(state.FlirtScore),
+		clampScore(state.BoundaryRiskScore),
+		clampScore(state.SupportNeedScore),
+		clampScore(state.PlayfulnessThreshold),
+		clampScore(state.InteractionHeat),
+		maxInt(state.TotalTurns, 0),
+		state.LastInteractionAt,
+		state.LastUserMessageAt,
+		state.LastAssistantMessageAt,
+		state.LastStageChangeAt,
+	); err != nil {
+		return fmt.Errorf("upsert relationship_state: %w", err)
+	}
+	return nil
 }
 
 // GetUserProfile 读取用户画像；不存在时返回空结构体。
@@ -624,6 +741,42 @@ func vectorLiteral(embedding []float32) string {
 		parts = append(parts, strconv.FormatFloat(float64(v), 'f', -1, 32))
 	}
 	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// defaultRelationshipState 返回一个温和保守的初始关系状态。
+func defaultRelationshipState(userID string) RelationshipState {
+	return RelationshipState{
+		UserID:               userID,
+		Stage:                "familiar",
+		FamiliarityScore:     0.36,
+		IntimacyScore:        0.24,
+		TrustScore:           0.40,
+		FlirtScore:           0.08,
+		BoundaryRiskScore:    0.08,
+		SupportNeedScore:     0.30,
+		PlayfulnessThreshold: 0.20,
+		InteractionHeat:      0.22,
+		TotalTurns:           0,
+	}
+}
+
+// clampScore 把连续状态压到 0~1，避免异常值污染策略。
+func clampScore(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// maxInt 返回两个整数中的较大值。
+func maxInt(a, b int) int {
+	if a >= b {
+		return a
+	}
+	return b
 }
 
 // safeConfidence 把置信度限制在 0~1。

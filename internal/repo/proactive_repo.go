@@ -14,17 +14,19 @@ import (
 
 // ProactiveState 表示用户主动消息开关、免打扰与冷却状态。
 type ProactiveState struct {
-	UserID              string
-	Enabled             bool
-	QuietHoursEnabled   bool
-	QuietStartMinute    int
-	QuietEndMinute      int
-	Timezone            string
-	CooldownSeconds     int
-	LastProactiveAt     *time.Time
-	LastProactiveReason string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	UserID                string
+	Enabled               bool
+	QuietHoursEnabled     bool
+	QuietStartMinute      int
+	QuietEndMinute        int
+	Timezone              string
+	CooldownSeconds       int
+	LastProactiveAt       *time.Time
+	LastProactiveReason   string
+	LastProactiveTaskType string
+	LastProactiveContent  string
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // ProactiveTask 表示“未来某时要不要主动”的任务实体。
@@ -103,7 +105,8 @@ func (r *PGProactiveRepository) GetState(ctx context.Context, userID string) (Pr
 	}
 
 	const query = `SELECT user_id, enabled, quiet_hours_enabled, quiet_start_minute, quiet_end_minute,
-		timezone, cooldown_seconds, last_proactive_at, last_proactive_reason, created_at, updated_at
+		timezone, cooldown_seconds, last_proactive_at, last_proactive_reason, last_proactive_task_type,
+		last_proactive_content, created_at, updated_at
 		FROM proactive_state
 		WHERE user_id = $1`
 
@@ -118,6 +121,8 @@ func (r *PGProactiveRepository) GetState(ctx context.Context, userID string) (Pr
 		&out.CooldownSeconds,
 		&out.LastProactiveAt,
 		&out.LastProactiveReason,
+		&out.LastProactiveTaskType,
+		&out.LastProactiveContent,
 		&out.CreatedAt,
 		&out.UpdatedAt,
 	); err != nil {
@@ -153,8 +158,9 @@ func (r *PGProactiveRepository) UpsertState(ctx context.Context, state Proactive
 
 	const query = `INSERT INTO proactive_state (
 			user_id, enabled, quiet_hours_enabled, quiet_start_minute, quiet_end_minute,
-			timezone, cooldown_seconds, last_proactive_at, last_proactive_reason
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			timezone, cooldown_seconds, last_proactive_at, last_proactive_reason,
+			last_proactive_task_type, last_proactive_content
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (user_id) DO UPDATE SET
 			enabled = EXCLUDED.enabled,
 			quiet_hours_enabled = EXCLUDED.quiet_hours_enabled,
@@ -167,6 +173,14 @@ func (r *PGProactiveRepository) UpsertState(ctx context.Context, state Proactive
 				WHEN EXCLUDED.last_proactive_reason <> '' THEN EXCLUDED.last_proactive_reason
 				ELSE proactive_state.last_proactive_reason
 			END,
+			last_proactive_task_type = CASE
+				WHEN EXCLUDED.last_proactive_task_type <> '' THEN EXCLUDED.last_proactive_task_type
+				ELSE proactive_state.last_proactive_task_type
+			END,
+			last_proactive_content = CASE
+				WHEN EXCLUDED.last_proactive_content <> '' THEN EXCLUDED.last_proactive_content
+				ELSE proactive_state.last_proactive_content
+			END,
 			updated_at = NOW()`
 	if _, err := r.pool.Exec(ctx, query,
 		state.UserID,
@@ -178,6 +192,8 @@ func (r *PGProactiveRepository) UpsertState(ctx context.Context, state Proactive
 		state.CooldownSeconds,
 		state.LastProactiveAt,
 		strings.TrimSpace(state.LastProactiveReason),
+		strings.TrimSpace(state.LastProactiveTaskType),
+		strings.TrimSpace(state.LastProactiveContent),
 	); err != nil {
 		return fmt.Errorf("upsert proactive_state: %w", err)
 	}
@@ -654,13 +670,41 @@ func (r *PGProactiveRepository) MarkOutboundDelivered(
 		return fmt.Errorf("mark proactive task sent: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `INSERT INTO proactive_state (user_id, last_proactive_at, last_proactive_reason)
-		VALUES ($1, $2, $3)
+	taskType := strings.TrimSpace(payloadString(clientPayload["task_type"]))
+	if taskType == "" {
+		taskType = strings.TrimSpace(payloadString(item.Payload["task_type"]))
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO proactive_state (
+			user_id, last_proactive_at, last_proactive_reason, last_proactive_task_type, last_proactive_content
+		)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (user_id) DO UPDATE SET
 			last_proactive_at = EXCLUDED.last_proactive_at,
 			last_proactive_reason = EXCLUDED.last_proactive_reason,
-			updated_at = NOW()`, item.UserID, deliveredAt, item.Reason); err != nil {
+			last_proactive_task_type = EXCLUDED.last_proactive_task_type,
+			last_proactive_content = EXCLUDED.last_proactive_content,
+			updated_at = NOW()`, item.UserID, deliveredAt, item.Reason, taskType, content); err != nil {
 		return fmt.Errorf("update proactive_state sent timestamp: %w", err)
+	}
+
+	if taskType == "topic_reengage" {
+		topicKey := strings.TrimSpace(payloadString(clientPayload["topic_key"]))
+		if topicKey == "" {
+			topicKey = strings.TrimSpace(payloadString(item.Payload["topic_key"]))
+		}
+		if topicKey != "" {
+			if _, err := tx.Exec(ctx, `UPDATE conversation_topics
+				SET last_recalled_at = $4,
+					next_recall_at = NULL,
+					recall_count = recall_count + 1,
+					updated_at = NOW()
+				WHERE user_id = $1
+				  AND session_id = $2
+				  AND topic_key = $3`, item.UserID, item.SessionID, topicKey, deliveredAt); err != nil {
+				return fmt.Errorf("mark conversation_topic recalled: %w", err)
+			}
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -841,6 +885,24 @@ func collectProactiveTasks(rows pgx.Rows) ([]ProactiveTask, error) {
 		return nil, fmt.Errorf("iterate proactive tasks: %w", err)
 	}
 	return out, nil
+}
+
+// payloadString 把 JSON payload 中的值安全转为字符串，避免状态回写时丢字段。
+func payloadString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case fmt.Stringer:
+		return x.String()
+	case float64:
+		return fmt.Sprintf("%.0f", x)
+	case int:
+		return fmt.Sprintf("%d", x)
+	case int64:
+		return fmt.Sprintf("%d", x)
+	default:
+		return ""
+	}
 }
 
 // collectOutboundItems 把查询结果批量收集为发送队列切片。
